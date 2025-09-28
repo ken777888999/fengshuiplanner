@@ -44,4 +44,5 @@ knowledge_base/*.epub
 
 # 日志文件
 logs/
+
 *.log
