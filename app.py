@@ -6,13 +6,36 @@ from dotenv import load_dotenv
 import logging
 from functools import wraps
 from flask_cors import CORS
+import sys
 
 # 配置日志
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler('app.log')
+    ]
+)
 logger = logging.getLogger(__name__)
 
 # 加载环境变量
 load_dotenv()
+
+def check_environment():
+    """Check all required environment variables and configurations"""
+    required_vars = {
+        "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
+        "WP_API_KEY": os.getenv("WP_API_KEY"),
+    }
+    
+    missing_vars = [k for k, v in required_vars.items() if not v]
+    
+    if missing_vars:
+        logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
+        return False
+        
+    return True
 
 # 配置API密钥
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -21,13 +44,21 @@ if not GEMINI_API_KEY:
     
 genai.configure(api_key=GEMINI_API_KEY)
 
+def init_model():
+    """Initialize Gemini model with proper error handling"""
+    try:
+        model = genai.GenerativeModel('gemini-pro')
+        # 做一个简单的测试以确保模型正常工作
+        test_response = model.generate_content("Test.")
+        if test_response:
+            logger.info("Successfully initialized and tested Gemini Pro")
+            return model
+    except Exception as e:
+        logger.error(f"Failed to initialize Gemini model: {str(e)}")
+        return None
+
 # 初始化模型
-try:
-    model = genai.GenerativeModel('gemini-1.5-pro')
-    logger.info("Successfully initialized Gemini 1.5 Pro")
-except Exception as e:
-    logger.warning(f"Failed to initialize Gemini 1.5 Pro: {str(e)}, falling back to Gemini Pro")
-    model = genai.GenerativeModel('gemini-pro')
+model = init_model()
 
 app = Flask(__name__)
 # 添加CORS支持，允许跨域请求
@@ -50,9 +81,7 @@ def require_api_key(f):
 KNOWLEDGE_BASE_PATH = "knowledge_base/"
 
 def get_feng_shui_knowledge():
-    """
-    获取风水知识库中的所有文件
-    """
+    """获取风水知识库中的所有文件"""
     try:
         files = os.listdir(KNOWLEDGE_BASE_PATH)
         return [f for f in files if f.endswith('.pdf') or f.endswith('.epub')]
@@ -98,12 +127,51 @@ def health():
     """健康检查端点"""
     return jsonify({"status": "ok"})
 
+@app.route('/model-status', methods=['GET'])
+def check_model_status():
+    """Check if the model is working properly"""
+    try:
+        if not model:
+            return jsonify({
+                "status": "error",
+                "message": "Model not initialized"
+            }), 500
+
+        # 进行简单的测试生成
+        test_response = model.generate_content("Test message.")
+        
+        return jsonify({
+            "status": "ok",
+            "message": "Model is working properly",
+            "test_response": test_response.text if test_response else None
+        })
+
+    except Exception as e:
+        return jsonify({
+            "status": "error",
+            "message": f"Model error: {str(e)}"
+        }), 500
+
 @app.route('/analyze', methods=['POST'])
 @require_api_key
 def analyze_bedroom():
     """分析卧室布局的主要端点"""
     try:
+        if not model:
+            logger.error("Gemini model not initialized")
+            return jsonify({
+                "success": True,
+                "analysis": generate_backup_analysis(is_paid=False),
+                "using_backup": True
+            })
+
         data = request.json
+        if not data:
+            return jsonify({
+                "success": False,
+                "error": "No data provided"
+            }), 400
+
         logger.info(f"Received analysis request: {json.dumps(data)[:100]}...")
         
         # 提取数据
@@ -111,26 +179,42 @@ def analyze_bedroom():
         user_info = data.get('userInfo', {})
         is_paid = data.get('isPaid', False)
         
-        # 构建用于分析的提示词
+        if not grid_data:
+            return jsonify({
+                "success": False,
+                "error": "No grid data provided"
+            }), 400
+
+        # 构建提示词
         prompt = create_analysis_prompt(grid_data, user_info, is_paid)
         
-        # 生成分析
-        logger.info("Sending request to Gemini model")
-        response = model.generate_content(prompt)
-        logger.info("Received response from Gemini model")
-        
-        # 解析和格式化响应
-        analysis = parse_response(response.text, is_paid)
-        
-        return jsonify({"success": True, "analysis": analysis})
-    
+        try:
+            # 添加超时处理
+            response = model.generate_content(
+                prompt,
+                generation_config={
+                    "temperature": 0.7,
+                    "top_p": 0.8,
+                    "top_k": 40,
+                    "max_output_tokens": 1024,
+                }
+            )
+            
+            if not response or not response.text:
+                raise Exception("Empty response from model")
+                
+            analysis = parse_response(response.text, is_paid)
+            return jsonify({"success": True, "analysis": analysis})
+            
+        except Exception as e:
+            logger.error(f"Model generation error: {str(e)}")
+            raise
+
     except Exception as e:
         logger.error(f"Error in analyze_bedroom: {str(e)}")
-        # 使用备用分析
-        analysis = generate_backup_analysis(is_paid=False)
         return jsonify({
             "success": True,
-            "analysis": analysis,
+            "analysis": generate_backup_analysis(is_paid=False),
             "using_backup": True
         })
 
@@ -339,16 +423,21 @@ def test_endpoint():
         "success": True, 
         "message": "Feng Shui API is working properly",
         "version": "1.0.0",
-        "gemini_available": True
+        "gemini_available": True if model else False
     })
 
 if __name__ == '__main__':
-    # Ensure knowledge base directory exists
+    if not check_environment():
+        logger.error("Environment check failed. Please check your configuration.")
+        sys.exit(1)
+        
     os.makedirs(KNOWLEDGE_BASE_PATH, exist_ok=True)
-    
-    # Check knowledge base files
     knowledge_files = get_feng_shui_knowledge()
     logger.info(f"Found {len(knowledge_files)} knowledge base files: {knowledge_files}")
+    
+    # 初始化模型
+    if not init_model():
+        logger.error("Failed to initialize model. Starting with backup mode.")
     
     port = int(os.environ.get('PORT', 8080))
     app.run(debug=False, host='0.0.0.0', port=port)
