@@ -18,15 +18,36 @@ load_dotenv()
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 if not GEMINI_API_KEY:
     logger.error("GEMINI_API_KEY not found in environment variables")
-    
-try:
-    genai.configure(api_key=GEMINI_API_KEY)
-    # 初始化模型
-    model = genai.GenerativeModel('gemini-pro')
-    GEMINI_AVAILABLE = True
-except Exception as e:
-    logger.error(f"Error initializing Gemini API: {str(e)}")
     GEMINI_AVAILABLE = False
+else:
+    try:
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # 尝试列出可用模型以验证API密钥
+        try:
+            models = genai.list_models()
+            available_models = [m.name for m in models if "generateContent" in m.supported_generation_methods]
+            logger.info(f"Available Gemini models: {available_models}")
+            
+            # 选择合适的模型
+            model_name = 'gemini-1.5-pro'  # 优先使用新版模型
+            if model_name not in available_models and available_models:
+                model_name = available_models[0]  # 如果指定模型不可用，使用第一个可用模型
+                logger.warning(f"Preferred model not available, using {model_name} instead")
+            
+            # 初始化模型
+            model = genai.GenerativeModel(model_name)
+            GEMINI_AVAILABLE = True
+            logger.info(f"Successfully initialized Gemini API with model: {model_name}")
+        except Exception as list_error:
+            logger.error(f"Error listing Gemini models: {str(list_error)}")
+            # 尝试使用默认模型，可能会在实际使用时失败，但先保持GEMINI_AVAILABLE为True
+            model = genai.GenerativeModel('gemini-1.5-pro')
+            GEMINI_AVAILABLE = True
+            logger.warning("Using default model 'gemini-1.5-pro' without validation")
+    except Exception as e:
+        logger.error(f"Error initializing Gemini API: {str(e)}")
+        GEMINI_AVAILABLE = False
 
 app = Flask(__name__)
 # 添加CORS支持，允许跨域请求
@@ -96,6 +117,65 @@ def health():
         "gemini_available": GEMINI_AVAILABLE
     })
 
+@app.route('/test-gemini', methods=['GET'])
+def test_gemini():
+    """测试Gemini API连接的端点"""
+    try:
+        # 列出可用的模型
+        available_models = []
+        try:
+            models = genai.list_models()
+            for m in models:
+                if "generateContent" in m.supported_generation_methods:
+                    available_models.append(m.name)
+        except Exception as e:
+            available_models = ["Error listing models: " + str(e)]
+        
+        if GEMINI_AVAILABLE:
+            try:
+                # 尝试使用新模型名称
+                test_model = genai.GenerativeModel('gemini-1.5-pro')
+                response = test_model.generate_content("简单的测试：请用中文回答'Gemini API调用成功'")
+                
+                return jsonify({
+                    "success": True, 
+                    "message": "Gemini API测试成功", 
+                    "response": response.text,
+                    "available_models": available_models,
+                    "api_key_set": bool(GEMINI_API_KEY)
+                })
+            except Exception as e:
+                # 如果新模型名称失败，尝试使用其他可用模型
+                error_msg = str(e)
+                alternative_result = "未尝试"
+                
+                if available_models:
+                    try:
+                        alt_model = genai.GenerativeModel(available_models[0])
+                        alt_response = alt_model.generate_content("测试替代模型")
+                        alternative_result = f"使用 {available_models[0]} 成功: {alt_response.text[:50]}..."
+                    except Exception as alt_e:
+                        alternative_result = f"尝试替代模型失败: {str(alt_e)}"
+                
+                return jsonify({
+                    "success": False, 
+                    "message": f"Gemini API测试失败: {error_msg}",
+                    "available_models": available_models,
+                    "api_key_set": bool(GEMINI_API_KEY),
+                    "alternative_model_test": alternative_result
+                })
+        else:
+            return jsonify({
+                "success": False, 
+                "message": "Gemini API未配置",
+                "api_key_set": bool(GEMINI_API_KEY)
+            })
+    except Exception as e:
+        return jsonify({
+            "success": False, 
+            "message": f"测试过程发生错误: {str(e)}"
+        })
+
 @app.route('/analyze', methods=['POST'])
 @require_api_key
 def analyze_bedroom():
@@ -117,6 +197,9 @@ def analyze_bedroom():
                 # 构建用于分析的提示词
                 prompt = create_analysis_prompt(grid_data, user_info, is_paid)
                 
+                # 记录使用的模型名称
+                logger.info(f"Using Gemini model: {model._model_name}")
+                
                 # 生成分析
                 logger.info("Sending request to Gemini model")
                 response = model.generate_content(prompt)
@@ -128,6 +211,12 @@ def analyze_bedroom():
                 return jsonify({"success": True, "analysis": analysis})
             except Exception as e:
                 logger.error(f"Error using Gemini API: {str(e)}")
+                
+                # 尝试识别具体错误类型
+                error_msg = str(e)
+                if "not found" in error_msg and "models/" in error_msg:
+                    logger.error("Model name error detected. Update the model name in the code.")
+                
                 # 如果Gemini API失败，使用备用分析
                 analysis = generate_backup_analysis(is_paid)
                 return jsonify({"success": True, "analysis": analysis})
