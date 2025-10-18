@@ -4,9 +4,14 @@ import os
 import json
 from dotenv import load_dotenv
 import logging
+import time
 from functools import wraps
 from flask_cors import CORS
 import sys
+
+# 版本控制
+VERSION = "1.0.1"
+REQUIRED_ENV_VARS = ["GEMINI_API_KEY", "WP_API_KEY"]
 
 # 配置日志
 logging.basicConfig(
@@ -22,19 +27,29 @@ logger = logging.getLogger(__name__)
 # 加载环境变量
 load_dotenv()
 
+# 知识库路径
+KNOWLEDGE_BASE_PATH = "knowledge_base/"
+
 def check_environment():
-    """Check all required environment variables and configurations"""
-    required_vars = {
-        "GEMINI_API_KEY": os.getenv("GEMINI_API_KEY"),
-        "WP_API_KEY": os.getenv("WP_API_KEY"),
-    }
-    
-    missing_vars = [k for k, v in required_vars.items() if not v]
+    """检查所有必需的环境变量和配置"""
+    missing_vars = []
+    for var in REQUIRED_ENV_VARS:
+        if not os.getenv(var):
+            missing_vars.append(var)
     
     if missing_vars:
         logger.error(f"Missing required environment variables: {', '.join(missing_vars)}")
         return False
         
+    # 检查知识库目录
+    if not os.path.exists(KNOWLEDGE_BASE_PATH):
+        try:
+            os.makedirs(KNOWLEDGE_BASE_PATH)
+            logger.info("Created knowledge base directory")
+        except Exception as e:
+            logger.error(f"Failed to create knowledge base directory: {str(e)}")
+            return False
+    
     return True
 
 # 配置API密钥
@@ -47,12 +62,29 @@ genai.configure(api_key=GEMINI_API_KEY)
 def init_model():
     """Initialize Gemini model with proper error handling"""
     try:
+        # 确保使用正确的API版本和模型名称
+        genai.configure(api_key=GEMINI_API_KEY)
+        
+        # 使用正确的模型名称
         model = genai.GenerativeModel('gemini-pro')
-        # 做一个简单的测试以确保模型正常工作
-        test_response = model.generate_content("Test.")
-        if test_response:
-            logger.info("Successfully initialized and tested Gemini Pro")
-            return model
+        
+        # 添加重试机制
+        max_retries = 3
+        retry_count = 0
+        
+        while retry_count < max_retries:
+            try:
+                test_response = model.generate_content("Test.")
+                if test_response:
+                    logger.info("Successfully initialized Gemini Pro model")
+                    return model
+            except Exception as e:
+                retry_count += 1
+                logger.warning(f"Retry {retry_count}/{max_retries} failed: {str(e)}")
+                time.sleep(1)  # 添加短暂延迟
+                
+        raise Exception("Failed to initialize model after maximum retries")
+        
     except Exception as e:
         logger.error(f"Failed to initialize Gemini model: {str(e)}")
         return None
@@ -61,7 +93,6 @@ def init_model():
 model = init_model()
 
 app = Flask(__name__)
-# 添加CORS支持，允许跨域请求
 CORS(app)
 
 # API密钥验证中间件
@@ -76,9 +107,6 @@ def require_api_key(f):
             return jsonify({"success": False, "error": "Invalid API key"}), 401
         return f(*args, **kwargs)
     return decorated_function
-
-# 知识库路径
-KNOWLEDGE_BASE_PATH = "knowledge_base/"
 
 def get_feng_shui_knowledge():
     """获取风水知识库中的所有文件"""
@@ -122,34 +150,60 @@ def extract_knowledge_for_prompt():
         logger.error(f"Error in extract_knowledge_for_prompt: {str(e)}")
         return ""
 
+@app.route('/')
+def index():
+    """处理根路径访问"""
+    return jsonify({
+        "service": "Feng Shui Space Planner API",
+        "status": "running",
+        "version": VERSION,
+        "endpoints": {
+            "analyze": "/analyze",
+            "health": "/health",
+            "model-status": "/model-status",
+            "test": "/test"
+        }
+    })
+
 @app.route('/health')
 def health():
     """健康检查端点"""
-    return jsonify({"status": "ok"})
+    return jsonify({
+        "status": "ok",
+        "version": VERSION
+    })
 
 @app.route('/model-status', methods=['GET'])
 def check_model_status():
-    """Check if the model is working properly"""
+    """检查模型是否正常工作"""
     try:
         if not model:
             return jsonify({
                 "status": "error",
-                "message": "Model not initialized"
+                "message": "Model not initialized",
+                "version": VERSION,
+                "environment_check": check_environment()
             }), 500
 
         # 进行简单的测试生成
-        test_response = model.generate_content("Test message.")
+        test_prompt = "Provide a simple Feng Shui tip."
+        test_response = model.generate_content(test_prompt)
         
         return jsonify({
             "status": "ok",
             "message": "Model is working properly",
-            "test_response": test_response.text if test_response else None
+            "version": VERSION,
+            "test_response": test_response.text if test_response else None,
+            "environment_check": check_environment()
         })
 
     except Exception as e:
+        logger.error(f"Model status check failed: {str(e)}")
         return jsonify({
             "status": "error",
-            "message": f"Model error: {str(e)}"
+            "message": f"Model error: {str(e)}",
+            "version": VERSION,
+            "environment_check": check_environment()
         }), 500
 
 @app.route('/analyze', methods=['POST'])
@@ -204,7 +258,11 @@ def analyze_bedroom():
                 raise Exception("Empty response from model")
                 
             analysis = parse_response(response.text, is_paid)
-            return jsonify({"success": True, "analysis": analysis})
+            return jsonify({
+                "success": True, 
+                "analysis": analysis,
+                "version": VERSION
+            })
             
         except Exception as e:
             logger.error(f"Model generation error: {str(e)}")
@@ -215,7 +273,8 @@ def analyze_bedroom():
         return jsonify({
             "success": True,
             "analysis": generate_backup_analysis(is_paid=False),
-            "using_backup": True
+            "using_backup": True,
+            "version": VERSION
         })
 
 def create_analysis_prompt(grid_data, user_info, is_paid):
@@ -411,10 +470,19 @@ def verify_payment():
         logger.info(f"Payment verification request for Order: {order_id}, User: {user_id}, Product: {product_id}")
         
         # Simplified verification logic
-        return jsonify({"success": True, "verified": True})
+        return jsonify({
+            "success": True, 
+            "verified": True,
+            "version": VERSION
+        })
     except Exception as e:
         logger.error(f"Error in verify_payment: {str(e)}")
-        return jsonify({"success": False, "verified": False, "error": str(e)}), 500
+        return jsonify({
+            "success": False, 
+            "verified": False, 
+            "error": str(e),
+            "version": VERSION
+        }), 500
 
 @app.route('/test', methods=['GET'])
 def test_endpoint():
@@ -422,9 +490,32 @@ def test_endpoint():
     return jsonify({
         "success": True, 
         "message": "Feng Shui API is working properly",
-        "version": "1.0.0",
+        "version": VERSION,
         "gemini_available": True if model else False
     })
+
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({
+        "error": "Not found",
+        "message": "The requested resource was not found on this server.",
+        "available_endpoints": [
+            "/",
+            "/analyze",
+            "/health",
+            "/model-status",
+            "/test"
+        ],
+        "version": VERSION
+    }), 404
+
+@app.errorhandler(500)
+def server_error(error):
+    return jsonify({
+        "error": "Internal server error",
+        "message": str(error),
+        "version": VERSION
+    }), 500
 
 if __name__ == '__main__':
     if not check_environment():
