@@ -120,6 +120,68 @@ def init_model():
 # 初始化模型
 gemini_model = init_model()
 
+# 风水分析函数
+def analyze_fengshui(grid_data, user_info, is_paid=False):
+    """风水分析逻辑"""
+    try:
+        if not gemini_model:
+            return {
+                "error": "Gemini model not available",
+                "fallback_response": "Service temporarily unavailable"
+            }, 503
+
+        # 构建提示词
+        room_description = ""
+        for position, items in grid_data.items():
+            if items:
+                room_description += f"Position {position}: {', '.join(items)}. "
+
+        concerns = user_info.get('concerns', 'general feng shui')
+        
+        # 根据是否付费用户提供不同深度的分析
+        depth = "detailed" if is_paid else "basic"
+        
+        prompt = f"""
+        As a Feng Shui expert, analyze this room arrangement:
+        {room_description}
+        
+        User's specific concerns: {concerns}
+        
+        Provide a {depth} Feng Shui analysis focusing on:
+        1. Overall energy flow
+        2. Specific recommendations for improvement
+        3. Potential issues to address
+        
+        {' Include advanced remedies and specific timing recommendations.' if is_paid else ''}
+        """
+
+        # 生成配置
+        generation_config = genai.types.GenerationConfig(
+            temperature=0.7,
+            max_output_tokens=1000 if is_paid else 500,
+            top_p=0.95,
+            top_k=40
+        )
+
+        # 生成分析
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config=generation_config
+        )
+
+        return {
+            "success": True,
+            "analysis": response.text,
+            "type": "detailed" if is_paid else "basic"
+        }
+
+    except Exception as e:
+        logger.error(f"Feng Shui analysis error: {str(e)}")
+        return {
+            "error": f"Analysis failed: {str(e)}",
+            "fallback_response": "Unable to complete analysis. Please try again."
+        }, 500
+
 # API信息端点
 @app.route('/api-info', methods=['GET'])
 @require_api_key
@@ -198,6 +260,72 @@ def generate_text():
         logger.error(f"Request processing error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
+# 风水分析端点
+@app.route('/analyze-fengshui', methods=['POST'])
+@require_api_key
+def fengshui_endpoint():
+    """风水分析端点"""
+    try:
+        data = request.json
+        
+        # 验证输入
+        if not data or 'gridData' not in data:
+            return jsonify({"error": "Missing required data"}), 400
+
+        grid_data = data.get('gridData', {})
+        user_info = data.get('userInfo', {})
+        is_paid = data.get('isPaid', False)
+
+        # 验证网格数据格式
+        if not isinstance(grid_data, dict):
+            return jsonify({"error": "Invalid grid data format"}), 400
+
+        # 执行分析
+        result = analyze_fengshui(grid_data, user_info, is_paid)
+        
+        # 如果返回值是元组（包含错误状态码）
+        if isinstance(result, tuple):
+            return jsonify(result[0]), result[1]
+            
+        return jsonify(result)
+
+    except Exception as e:
+        logger.error(f"Feng Shui endpoint error: {str(e)}")
+        return jsonify({
+            "error": "Failed to process request",
+            "message": str(e)
+        }), 500
+
+# 获取风水位置信息
+@app.route('/fengshui-positions', methods=['GET'])
+def get_fengshui_positions():
+    """返回风水分析中可用的位置信息"""
+    return jsonify({
+        "positions": {
+            "1": "North",
+            "2": "Northeast",
+            "3": "East",
+            "4": "Southeast",
+            "5": "South",
+            "6": "Southwest",
+            "7": "West",
+            "8": "Northwest",
+            "9": "Center"
+        },
+        "common_items": [
+            "bed",
+            "desk",
+            "door",
+            "window",
+            "mirror",
+            "plant",
+            "cabinet",
+            "chair",
+            "electronics",
+            "water_feature"
+        ]
+    })
+
 # 健康检查端点
 @app.route('/health', methods=['GET'])
 def health_check():
@@ -209,7 +337,7 @@ def health_check():
     }
     return jsonify(status)
 
-# 重新初始化模型端点（用于故障恢复）
+# 重新初始化模型端点
 @app.route('/reinitialize', methods=['POST'])
 @require_api_key
 def reinitialize_model():
@@ -241,10 +369,12 @@ def index():
         "api": "Gemini API Service",
         "version": "1.0",
         "endpoints": {
+            "/analyze-fengshui": "Analyze Feng Shui arrangement (POST)",
             "/generate": "Generate text with Gemini (POST)",
             "/api-info": "Get API and model information (GET)",
             "/health": "Health check (GET)",
-            "/reinitialize": "Reinitialize model (POST)"
+            "/reinitialize": "Reinitialize model (POST)",
+            "/fengshui-positions": "Get Feng Shui position information (GET)"
         }
     })
 
