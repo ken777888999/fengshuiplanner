@@ -1,397 +1,385 @@
-import os
-import time
-import logging
-import google.generativeai as genai
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
-from dotenv import load_dotenv
-from functools import wraps
+import os
+import logging
+import random
+import string
+import time
+import re
+from datetime import datetime
+import openai
+import traceback
+# 导入知识库处理模块
+from knowledge_base_handler import extract_knowledge_for_prompt
 
-# 加载环境变量
-load_dotenv()
+# 创建应用实例
+app = Flask(__name__)
+CORS(app)  # 允许跨域请求
 
 # 配置日志
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
-logger = logging.getLogger('app')
+logging.basicConfig(level=logging.INFO, 
+                    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
+logger = logging.getLogger(__name__)
 
-# 获取环境变量
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-APP_API_KEY = os.getenv('APP_API_KEY')  # 用于API认证
+# 配置环境
+API_KEYS = {
+    "BSQ+a+q&5`Kv0O!3hons/-hb`I/-!M": "client1"
+}
 
-# 初始化Flask应用
-app = Flask(__name__)
-CORS(app)  # 启用CORS
+# 获取OpenAI API密钥
+OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY')
+if not OPENAI_API_KEY:
+    logger.warning("OpenAI API key not found in environment variables")
+else:
+    openai.api_key = OPENAI_API_KEY
+    logger.info("OpenAI API key configured successfully")
+
+# 初始化计数器
+request_counter = 0
+
+# 区域名称映射
+BAGUA_POSITIONS = {
+    "1": "Northwest (Knowledge)",
+    "2": "North (Career)",
+    "3": "Northeast (Wisdom)",
+    "4": "West (Children)",
+    "5": "Center (Health)",
+    "6": "East (Family)",
+    "7": "Southwest (Relationships)",
+    "8": "South (Fame)",
+    "9": "Southeast (Wealth)"
+}
+
+# 元素类型映射
+ELEMENT_TYPES = {
+    "bed": "bed",
+    "door": "door",
+    "window": "window",
+    "mirror": "mirror",
+    "device": "electronic device",
+    "sofa": "sofa",
+    "table": "table",
+    "plant": "plant"
+}
+
+# 区域类型映射
+AREA_TYPES = {
+    "private": "private area",
+    "public": "public area", 
+    "work": "work area",
+    "entertain": "entertainment area"
+}
 
 # API密钥验证装饰器
 def require_api_key(f):
-    @wraps(f)
     def decorated_function(*args, **kwargs):
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        if not api_key or api_key != APP_API_KEY:
-            return jsonify({"error": "Invalid or missing API key"}), 401
+        api_key = request.headers.get('X-API-Key')
+        if api_key not in API_KEYS:
+            logger.warning(f"Invalid API key attempt: {api_key}")
+            return jsonify({"success": False, "message": "Invalid API key"}), 401
         return f(*args, **kwargs)
+    decorated_function.__name__ = f.__name__
     return decorated_function
 
-# 初始化Gemini模型
-def init_model():
-    """Initialize Gemini model with comprehensive error handling"""
-    try:
-        # 检查API密钥
-        if not GEMINI_API_KEY or GEMINI_API_KEY == "your_api_key_here":
-            logger.error("GEMINI_API_KEY not properly set")
-            return None
+# 生成唯一会话ID
+def generate_session_id():
+    timestamp = int(time.time())
+    random_str = ''.join(random.choices(string.ascii_letters + string.digits, k=6))
+    return f"{timestamp}-{random_str}"
+
+# 格式化布局数据
+def format_layout_data(grid_data):
+    layout_description = []
+    
+    for position in sorted(grid_data.keys(), key=int):
+        if not grid_data[position]:
+            continue
             
-        # 配置生成式AI
-        logger.info("Configuring Google Generative AI")
-        genai.configure(
-            api_key=GEMINI_API_KEY,
-            client_options={
-                'api_endpoint': 'generativelanguage.googleapis.com'
-            }
-        )
+        bagua_name = BAGUA_POSITIONS.get(position, f"Position {position}")
+        elements = grid_data[position]
         
-        # 首先列出可用的模型进行调试
-        try:
-            logger.info("Attempting to list available models...")
-            models = genai.list_models()
-            available_models = [model.name for model in models]
-            logger.info(f"Available models: {available_models}")
-        except Exception as e:
-            logger.warning(f"Could not list models: {str(e)}")
-            available_models = []
+        # 处理元素
+        element_names = []
+        area_types = []
         
-        # 尝试不同的模型名称
-        model_names = [
-            'gemini-1.5-pro',
-            'gemini-1.0-pro', 
-            'gemini-pro',
-            'models/gemini-pro'
-        ]
-        
-        # 如果列出可用模型成功，优先尝试可用的模型
-        if available_models:
-            for available_model in available_models:
-                if "gemini" in available_model.lower() and "pro" in available_model.lower():
-                    try:
-                        logger.info(f"Trying available model: {available_model}")
-                        model_name = available_model.split("/")[-1] if "/" in available_model else available_model
-                        model = genai.GenerativeModel(model_name)
-                        # 测试连接
-                        response = model.generate_content("Test connection")
-                        if response and hasattr(response, 'text'):
-                            logger.info(f"Successfully initialized available model: {model_name}")
-                            return model
-                    except Exception as e:
-                        logger.warning(f"Available model {model_name} failed: {str(e)}")
-                        continue
-        
-        # 如果可用模型没有成功，尝试常见模型名称
-        for model_name in model_names:
-            try:
-                logger.info(f"Trying standard model name: {model_name}")
-                model = genai.GenerativeModel(model_name)
-                # 使用明确的配置测试连接
-                response = model.generate_content(
-                    "Test connection",
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.1,
-                        max_output_tokens=10
-                    )
-                )
-                if response and hasattr(response, 'text'):
-                    logger.info(f"Successfully initialized model: {model_name}")
-                    return model
-            except Exception as e:
-                logger.warning(f"Model {model_name} failed: {str(e)}")
-                continue
+        for item in elements:
+            if item in ELEMENT_TYPES:
+                element_names.append(ELEMENT_TYPES[item])
                 
-        # 如果所有尝试都失败
-        logger.error(f"All model attempts failed: {', '.join(model_names)}")
-        return None
+        # 处理区域类型
+        if 'areaTypes' in grid_data[position]:
+            for area_type in grid_data[position]['areaTypes']:
+                if area_type in AREA_TYPES:
+                    area_types.append(AREA_TYPES[area_type])
         
-    except Exception as e:
-        logger.error(f"Failed to initialize Gemini model: {str(e)}")
-        return None
-
-# 初始化模型
-gemini_model = init_model()
-
-# 风水分析函数
-def analyze_fengshui(grid_data, user_info, is_paid=False):
-    """风水分析逻辑"""
-    try:
-        if not gemini_model:
-            return {
-                "error": "Gemini model not available",
-                "fallback_response": "Service temporarily unavailable"
-            }, 503
-
-        # 构建提示词
-        room_description = ""
-        for position, items in grid_data.items():
-            if items:
-                room_description += f"Position {position}: {', '.join(items)}. "
-
-        concerns = user_info.get('concerns', 'general feng shui')
+        # 构建描述
+        if element_names:
+            elements_text = ", ".join(element_names)
+            layout_description.append(f"In the {bagua_name} area, there is a {elements_text}")
         
-        # 根据是否付费用户提供不同深度的分析
-        depth = "detailed" if is_paid else "basic"
-        
-        prompt = f"""
-        As a Feng Shui expert, analyze this room arrangement:
-        {room_description}
-        
-        User's specific concerns: {concerns}
-        
-        Provide a {depth} Feng Shui analysis focusing on:
-        1. Overall energy flow
-        2. Specific recommendations for improvement
-        3. Potential issues to address
-        
-        {' Include advanced remedies and specific timing recommendations.' if is_paid else ''}
-        """
+        if area_types:
+            types_text = ", ".join(area_types)
+            layout_description.append(f"The {bagua_name} area is marked as a {types_text}")
+    
+    return ". ".join(layout_description) + "."
 
-        # 生成配置
-        generation_config = genai.types.GenerationConfig(
-            temperature=0.7,
-            max_output_tokens=1000 if is_paid else 500,
-            top_p=0.95,
-            top_k=40
-        )
-
-        # 生成分析
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config=generation_config
-        )
-
-        return {
-            "success": True,
-            "analysis": response.text,
-            "type": "detailed" if is_paid else "basic"
-        }
-
-    except Exception as e:
-        logger.error(f"Feng Shui analysis error: {str(e)}")
-        return {
-            "error": f"Analysis failed: {str(e)}",
-            "fallback_response": "Unable to complete analysis. Please try again."
-        }, 500
-
-# API信息端点
-@app.route('/api-info', methods=['GET'])
-@require_api_key
-def api_info():
-    """提供API版本和可用模型的信息"""
-    try:
-        info = {
-            "library_version": genai.__version__,
-            "available_models": []
-        }
-        
+# 调用OpenAI API分析风水
+def analyze_feng_shui(prompt, retries=3, model="gpt-3.5-turbo"):
+    logger.info(f"Analyzing feng shui with prompt length: {len(prompt)}")
+    
+    for attempt in range(retries):
         try:
-            models = genai.list_models()
-            info["available_models"] = [
-                {"name": m.name, "display_name": getattr(m, "display_name", "Unknown")}
-                for m in models
-            ]
+            completion = openai.chat.completions.create(
+                model=model,
+                messages=[
+                    {"role": "system", "content": "You are a Feng Shui expert specializing in bedroom designs."},
+                    {"role": "user", "content": prompt}
+                ],
+                temperature=0.7,
+                max_tokens=1200
+            )
+            logger.info(f"OpenAI API call successful on attempt {attempt+1}")
+            return completion.choices[0].message.content
         except Exception as e:
-            info["models_error"] = str(e)
-            
-        return jsonify(info)
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
+            logger.error(f"OpenAI API call failed on attempt {attempt+1}: {str(e)}")
+            if attempt < retries - 1:
+                time.sleep(2)  # 重试前暂停
+            else:
+                logger.error(f"All {retries} attempts failed")
+                return None
 
-# 生成文本端点
-@app.route('/generate', methods=['POST'])
+# 生成分析提示
+def generate_analysis_prompt(layout_description, user_info, is_paid=False, format_type="structured"):
+    # 从知识库获取专业知识
+    feng_shui_knowledge = extract_knowledge_for_prompt()
+    
+    # 基础提示
+    base_prompt = f"""
+As a professional Feng Shui consultant specializing in bedrooms, please analyze this bedroom layout and provide advice:
+
+Bedroom Layout: {layout_description}
+
+User Information:
+- Birth Year: {user_info.get('birthYear', 'Not specified')}
+- Gender: {user_info.get('gender', 'Not specified')}
+- Main Concerns: {user_info.get('concerns', 'General wellness and sleep quality')}
+
+{feng_shui_knowledge}
+"""
+    
+    # 添加格式要求
+    if format_type == "structured":
+        format_instructions = """
+Please organize your analysis into these four sections with their respective headings:
+
+STRENGTHS: 
+List the positive aspects and elements that follow good Feng Shui principles in the bedroom.
+
+WEAKNESSES: 
+Point out problems and elements that don't follow good Feng Shui principles.
+
+IMPROVEMENT RECOMMENDATIONS: 
+Provide 3-5 specific suggestions for improvement, preferably in a list format.
+
+ADDITIONAL CONSIDERATIONS: 
+Offer more personalized advice based on the user's specific situation.
+"""
+    else:
+        format_instructions = """
+Please first highlight the positive aspects of the bedroom layout, then identify any issues, and finally provide specific recommendations for improvement.
+"""
+    
+    # 付费用户获得更详细的分析
+    if is_paid:
+        detail_level = """
+Please provide a detailed analysis and recommendations, including:
+- Whether the bed position and orientation are appropriate
+- If the relationship between doors, windows and the bed follows Feng Shui principles
+- Whether mirrors and electronic devices are properly placed
+- If energy flows smoothly through the space
+- An analysis of elemental balance in the bedroom based on Five Elements theory
+- Personalized improvement suggestions
+"""
+    else:
+        detail_level = """
+Please provide a basic analysis, but for the detailed solutions and personalized advice sections, only give a brief overview without specific implementation steps.
+"""
+    
+    full_prompt = base_prompt + format_instructions + detail_level
+    return full_prompt
+
+# 保存请求日志
+def log_request(api_key, user_id, request_data, response_data, is_successful):
+    client_name = API_KEYS.get(api_key, "Unknown client")
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    log_entry = {
+        "timestamp": timestamp,
+        "client": client_name,
+        "user_id": user_id,
+        "success": is_successful,
+        "request_data": request_data,
+        "response_data": response_data
+    }
+    
+    # 这里可以连接数据库存储日志
+    # 简单起见，这里只是打印到控制台
+    logger.info(f"Request Log: {log_entry}")
+
+# 路由：首页
+@app.route('/')
+def index():
+    return "Feng Shui Analyzer API is running!"
+
+# 路由：健康检查
+@app.route('/health')
+def health_check():
+    return jsonify({"status": "healthy", "timestamp": datetime.now().isoformat()})
+
+# 路由：分析风水
+@app.route('/analyze', methods=['POST'])
 @require_api_key
-def generate_text():
-    """使用Gemini模型生成文本"""
+def analyze():
+    global request_counter
+    request_counter += 1
+    session_id = generate_session_id()
+    logger.info(f"New analysis request received. Session ID: {session_id}, Request #{request_counter}")
+    
+    # 获取请求数据
     try:
         data = request.json
-        
-        # 验证输入
-        if not data or not data.get('prompt'):
-            return jsonify({"error": "Missing prompt in request"}), 400
+        if not data:
+            return jsonify({"success": False, "message": "No data provided"}), 400
             
-        prompt = data.get('prompt')
-        temperature = float(data.get('temperature', 0.7))
-        max_tokens = int(data.get('max_tokens', 800))
-        
-        # 检查模型是否可用
-        if not gemini_model:
-            return jsonify({
-                "error": "Gemini model not available",
-                "fallback_response": "Gemini API is currently unavailable. Please try again later."
-            }), 503
-            
-        # 生成文本
-        try:
-            generation_config = genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                top_p=0.95,
-                top_k=40
-            )
-            
-            response = gemini_model.generate_content(
-                prompt,
-                generation_config=generation_config
-            )
-            
-            # 返回结果
-            return jsonify({
-                "success": True,
-                "generated_text": response.text,
-                "model_used": gemini_model._model_name
-            })
-        except Exception as e:
-            logger.error(f"Text generation error: {str(e)}")
-            return jsonify({
-                "error": f"Text generation failed: {str(e)}",
-                "fallback_response": "Failed to generate text with Gemini. Please try a different prompt."
-            }), 500
-            
-    except Exception as e:
-        logger.error(f"Request processing error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
-
-# 风水分析端点
-@app.route('/analyze-fengshui', methods=['POST'])
-@require_api_key
-def fengshui_endpoint():
-    """风水分析端点"""
-    try:
-        data = request.json
-        
-        # 验证输入
-        if not data or 'gridData' not in data:
-            return jsonify({"error": "Missing required data"}), 400
-
         grid_data = data.get('gridData', {})
         user_info = data.get('userInfo', {})
         is_paid = data.get('isPaid', False)
-
-        # 验证网格数据格式
-        if not isinstance(grid_data, dict):
-            return jsonify({"error": "Invalid grid data format"}), 400
-
-        # 执行分析
-        result = analyze_fengshui(grid_data, user_info, is_paid)
+        user_id = data.get('userId', 0)
+        format_type = data.get('format', 'freeform')  # 默认为自由格式
         
-        # 如果返回值是元组（包含错误状态码）
-        if isinstance(result, tuple):
-            return jsonify(result[0]), result[1]
+        logger.info(f"Analysis request for user ID: {user_id}, Paid status: {is_paid}")
+        
+        # 检查是否有床
+        has_bed = False
+        for position in grid_data.values():
+            if isinstance(position, list) and 'bed' in position:
+                has_bed = True
+                break
+        
+        if not has_bed:
+            return jsonify({"success": False, "message": "No bed found in layout"}), 400
             
-        return jsonify(result)
-
+        # 格式化布局数据
+        layout_description = format_layout_data(grid_data)
+        logger.info(f"Formatted layout description: {layout_description}")
+        
+        # 生成分析提示
+        prompt = generate_analysis_prompt(layout_description, user_info, is_paid, format_type)
+        
+        # 调用OpenAI API或使用备用回答
+        if OPENAI_API_KEY:
+            analysis = analyze_feng_shui(prompt)
+            if not analysis:
+                logger.warning("OpenAI analysis failed, using backup analysis")
+                analysis = generate_backup_analysis(is_paid, format_type)
+        else:
+            logger.warning("No OpenAI API key, using backup analysis")
+            analysis = generate_backup_analysis(is_paid, format_type)
+        
+        response = {
+            "success": True,
+            "sessionId": session_id,
+            "analysis": analysis,
+            "isPaid": is_paid
+        }
+        
+        # 记录成功的请求
+        log_request(
+            api_key=request.headers.get('X-API-Key'),
+            user_id=user_id,
+            request_data={"grid": "data omitted", "user_info": user_info},
+            response_data={"session_id": session_id, "analysis_length": len(analysis)},
+            is_successful=True
+        )
+        
+        return jsonify(response)
+        
     except Exception as e:
-        logger.error(f"Feng Shui endpoint error: {str(e)}")
+        error_details = traceback.format_exc()
+        logger.error(f"Error processing request: {str(e)}\n{error_details}")
+        
+        # 记录失败的请求
+        try:
+            log_request(
+                api_key=request.headers.get('X-API-Key'),
+                user_id=data.get('userId', 0) if 'data' in locals() else 0,
+                request_data={"error": "could not parse"},
+                response_data={"error": str(e)},
+                is_successful=False
+            )
+        except:
+            logger.error("Error logging failed request")
+        
         return jsonify({
-            "error": "Failed to process request",
-            "message": str(e)
+            "success": False,
+            "message": "An error occurred while processing your request",
+            "error": str(e)
         }), 500
 
-# 获取风水位置信息
-@app.route('/fengshui-positions', methods=['GET'])
-def get_fengshui_positions():
-    """返回风水分析中可用的位置信息"""
-    return jsonify({
-        "positions": {
-            "1": "North",
-            "2": "Northeast",
-            "3": "East",
-            "4": "Southeast",
-            "5": "South",
-            "6": "Southwest",
-            "7": "West",
-            "8": "Northwest",
-            "9": "Center"
-        },
-        "common_items": [
-            "bed",
-            "desk",
-            "door",
-            "window",
-            "mirror",
-            "plant",
-            "cabinet",
-            "chair",
-            "electronics",
-            "water_feature"
-        ]
-    })
-
-# 健康检查端点
-@app.route('/health', methods=['GET'])
-def health_check():
-    """健康检查端点"""
-    status = {
-        "status": "ok",
-        "gemini_model_available": gemini_model is not None,
-        "timestamp": time.time()
-    }
-    return jsonify(status)
-
-# 重新初始化模型端点
-@app.route('/reinitialize', methods=['POST'])
-@require_api_key
-def reinitialize_model():
-    """重新初始化模型"""
-    try:
-        global gemini_model
-        gemini_model = init_model()
+# 生成备用分析
+def generate_backup_analysis(is_paid=False, format_type="structured"):
+    # 根据是否付费和格式类型，生成相应的备用分析
+    if format_type == "structured":
+        # 结构化的四部分格式
+        strengths = "Your bedroom layout follows basic Feng Shui principles. The bed position allows you to feel secure and supported, not directly in line with doors or windows. The overall energy flow in the room is conducive to good sleep and restoration."
         
-        if gemini_model:
-            return jsonify({
-                "success": True,
-                "message": "Model reinitialized successfully",
-                "model_used": gemini_model._model_name
-            })
+        weaknesses = "The mirror directly facing the bed may cause sleep disturbances. Too many electronic devices create unfavorable electromagnetic fields and disrupt energy flow. The bed headboard is not against a solid wall, which reduces support and security. Some furniture pieces block the smooth flow of chi energy, potentially causing energy stagnation."
+        
+        recommendations = "- Adjust mirror placement to avoid direct reflection of the bed\n- Remove or reduce electronic devices in the bedroom\n- Ensure the bed headboard is placed against a solid wall for stability\n- Rearrange furniture to allow smooth energy flow\n- Add metal elements in the northwest area to balance the room's energy"
+        
+        considerations = "Based on your birth year, you may particularly benefit from enhancing the southeast area of your bedroom. Consider placing some energetically positive objects like crystals or green plants in this area. Bedroom colors in neutral warm tones are recommended to promote relaxation."
+        
+        if not is_paid:
+            # 非付费用户只显示部分内容
+            weaknesses = weaknesses.split('.')[0] + "."
+            recommendations = "- Adjust mirror placement to avoid direct reflection of the bed"
+            considerations = "Upgrade to the premium version for more personalized recommendations."
+        
+        return f"STRENGTHS:\n{strengths}\n\nWEAKNESSES:\n{weaknesses}\n\nIMPROVEMENT RECOMMENDATIONS:\n{recommendations}\n\nADDITIONAL CONSIDERATIONS:\n{considerations}"
+    else:
+        # 自由格式
+        if is_paid:
+            return """
+Your bedroom layout generally follows good Feng Shui principles. The bed position allows you to feel secure and supported. The energy flow in the room is generally conducive to good sleep.
+
+However, I've noticed several areas that need improvement:
+
+1. The mirror directly facing the bed may cause sleep disturbances; consider repositioning or covering it at night
+2. Too many electronic devices in the bedroom create unfavorable electromagnetic fields and should be removed
+3. The bed headboard is not against a solid wall, which reduces support and security
+4. Some furniture pieces block the smooth flow of chi energy, potentially causing energy stagnation
+
+Recommended improvements:
+- Adjust mirror placement to avoid direct reflection of the bed
+- Remove or reduce electronic devices in the bedroom
+- Ensure the bed headboard is placed against a solid wall for stability
+- Rearrange furniture to allow smooth energy flow
+- Add metal elements in the northwest area to balance the room's energy
+
+Based on your birth year, you may particularly benefit from enhancing the southeast area of your bedroom. Consider placing some energetically positive objects like crystals or green plants in this area.
+"""
         else:
-            return jsonify({
-                "success": False,
-                "message": "Model reinitialization failed"
-            }), 500
-    except Exception as e:
-        logger.error(f"Reinitialization error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+            return """
+Your bedroom layout generally follows good Feng Shui principles. The bed position allows you to feel secure and supported. The energy flow in the room is generally conducive to good sleep.
 
-# 主页面
-@app.route('/', methods=['GET'])
-def index():
-    """API主页"""
-    return jsonify({
-        "api": "Gemini API Service",
-        "version": "1.0",
-        "endpoints": {
-            "/analyze-fengshui": "Analyze Feng Shui arrangement (POST)",
-            "/generate": "Generate text with Gemini (POST)",
-            "/api-info": "Get API and model information (GET)",
-            "/health": "Health check (GET)",
-            "/reinitialize": "Reinitialize model (POST)",
-            "/fengshui-positions": "Get Feng Shui position information (GET)"
-        }
-    })
+However, I've noticed that the mirror directly facing the bed may cause sleep disturbances, which is a key issue to address.
 
-# 错误处理
-@app.errorhandler(404)
-def not_found(e):
-    return jsonify({"error": "Endpoint not found"}), 404
+A simple improvement would be to adjust the mirror placement or cover it at night.
 
-@app.errorhandler(405)
-def method_not_allowed(e):
-    return jsonify({"error": "Method not allowed"}), 405
+Upgrade to the premium version for more detailed analysis and personalized recommendations.
+"""
 
-@app.errorhandler(500)
-def internal_error(e):
-    return jsonify({"error": "Internal server error"}), 500
-
-# 运行应用（仅在直接运行此文件时）
+# 启动服务器
 if __name__ == '__main__':
-    port = int(os.getenv('PORT', 5000))
-    app.run(host='0.0.0.0', port=port, debug=(os.getenv('FLASK_ENV') == 'development'))
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port)
