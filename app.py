@@ -1,8 +1,6 @@
-# 导入部分修改 - 位于文件顶部
 import os
 import time
 import logging
-# 替换 import google.generativeai as genai
 import cohere
 from flask import Flask, request, jsonify
 from flask_cors import CORS
@@ -20,16 +18,16 @@ logging.basicConfig(
 )
 logger = logging.getLogger('app')
 
-# 获取环境变量 - 修改环境变量名
-# GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
+# 获取环境变量
 COHERE_API_KEY = os.getenv('COHERE_API_KEY', 'xeJWwYbXgmFnKDmaAHvtkcmHo2jknduhR8FPG1Dm')
 APP_API_KEY = os.getenv('APP_API_KEY')  # 用于API认证
 
 # 初始化Flask应用
 app = Flask(__name__)
-CORS(app)  # 启用CORS
+# 更具体的CORS配置
+CORS(app, resources={r"/*": {"origins": "*"}})
 
-# API密钥验证装饰器 - 无需修改
+# API密钥验证装饰器
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -40,7 +38,7 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# 完全替换init_model函数
+# 初始化Cohere模型
 def init_model():
     """Initialize Cohere model with error handling"""
     try:
@@ -68,10 +66,10 @@ def init_model():
         logger.error(f"Failed to initialize Cohere client: {str(e)}")
         return None
 
-# 初始化模型 - 变量名修改
+# 初始化模型
 cohere_client = init_model()
 
-# 替换风水分析函数
+# 风水分析函数
 def analyze_fengshui(grid_data, user_info, is_paid=False):
     """风水分析逻辑"""
     try:
@@ -80,6 +78,9 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
                 "error": "Cohere model not available",
                 "fallback_response": "Service temporarily unavailable"
             }, 503
+
+        # 记录输入数据
+        logger.info(f"Grid data: {grid_data}, User info: {user_info}, Is paid: {is_paid}")
 
         # 构建提示词
         room_description = ""
@@ -126,6 +127,8 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
         {'' if is_paid else 'Get the complete Feng Shui analysis including:\n- All identified issues in your bedroom layout\n- Three specific improvement recommendations\n- Detailed explanations of traditional Feng Shui principles\n\nPurchase the premium report to transform your bedroom into a harmonious sanctuary!'}
         """
 
+        logger.info(f"Sending prompt to Cohere: {prompt[:100]}...")
+
         # 生成分析
         response = cohere_client.chat(
             message=prompt,
@@ -133,6 +136,9 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
             temperature=0.7,
             max_tokens=1000 if is_paid else 500
         )
+
+        # 记录模型响应
+        logger.info(f"Received response from Cohere: {response.text[:100]}...")
 
         return {
             "success": True,
@@ -147,7 +153,44 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
             "fallback_response": "Unable to complete analysis. Please try again."
         }, 500
 
-# 修改API信息端点
+# 添加缺失的风水分析端点
+@app.route('/analyze-fengshui', methods=['POST'])
+@require_api_key
+def analyze_feng_shui_endpoint():
+    """风水分析端点"""
+    try:
+        data = request.json
+        logger.info(f"Received analysis request: {data}")
+        
+        # 验证输入
+        if not data:
+            return jsonify({"error": "Missing request data"}), 400
+            
+        grid_data = data.get('gridData', {})
+        user_info = data.get('userInfo', {})
+        is_paid = data.get('isPaid', False)
+        
+        # 记录请求信息用于调试
+        logger.info(f"Analyzing Feng Shui with: gridData={len(grid_data)} items, isPaid={is_paid}")
+        
+        # 调用分析函数
+        result = analyze_fengshui(grid_data, user_info, is_paid)
+        
+        # 如果结果是元组，表示有错误发生
+        if isinstance(result, tuple):
+            return jsonify(result[0]), result[1]
+            
+        # 返回分析结果
+        return jsonify(result)
+            
+    except Exception as e:
+        logger.error(f"Feng Shui analysis endpoint error: {str(e)}")
+        return jsonify({
+            "error": f"Analysis request failed: {str(e)}",
+            "fallback_response": "Unable to process your request. Please try again."
+        }), 500
+
+# API信息端点
 @app.route('/api-info', methods=['GET'])
 @require_api_key
 def api_info():
@@ -161,7 +204,7 @@ def api_info():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 修改生成文本端点
+# 文本生成端点
 @app.route('/generate', methods=['POST'])
 @require_api_key
 def generate_text():
@@ -210,8 +253,7 @@ def generate_text():
         logger.error(f"Request processing error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# 风水分析端点 - 无需修改
-# 健康检查端点 - 需修改
+# 健康检查端点
 @app.route('/health', methods=['GET'])
 def health_check():
     """健康检查端点"""
@@ -223,7 +265,7 @@ def health_check():
     }
     return jsonify(status)
 
-# 重新初始化模型端点 - 需修改
+# 重新初始化模型端点
 @app.route('/reinitialize', methods=['POST'])
 @require_api_key
 def reinitialize_model():
@@ -247,7 +289,25 @@ def reinitialize_model():
         logger.error(f"Reinitialization error: {str(e)}")
         return jsonify({"error": str(e)}), 500
 
-# 主页面 - 更新API信息
+# 获取风水位置信息端点
+@app.route('/fengshui-positions', methods=['GET'])
+@require_api_key
+def feng_shui_positions():
+    """返回九宫格位置的传统风水含义"""
+    positions = {
+        "1": {"name": "Northwest", "element": "Metal", "associations": "Helpful People, Travel"},
+        "2": {"name": "North", "element": "Water", "associations": "Career, Life Path"},
+        "3": {"name": "Northeast", "element": "Earth", "associations": "Knowledge, Wisdom"},
+        "4": {"name": "West", "element": "Metal", "associations": "Children, Creativity"},
+        "5": {"name": "Center", "element": "Earth", "associations": "Health, Balance"},
+        "6": {"name": "East", "element": "Wood", "associations": "Family, Community"},
+        "7": {"name": "Southwest", "element": "Earth", "associations": "Love, Marriage"},
+        "8": {"name": "South", "element": "Fire", "associations": "Fame, Reputation"},
+        "9": {"name": "Southeast", "element": "Wood", "associations": "Wealth, Prosperity"}
+    }
+    return jsonify(positions)
+
+# 主页面
 @app.route('/', methods=['GET'])
 def index():
     """API主页"""
@@ -264,4 +324,20 @@ def index():
         }
     })
 
-# 错误处理 - 无需修改
+# 错误处理程序
+@app.errorhandler(404)
+def not_found(error):
+    return jsonify({"error": "Endpoint not found"}), 404
+
+@app.errorhandler(405)
+def method_not_allowed(error):
+    return jsonify({"error": "Method not allowed"}), 405
+
+@app.errorhandler(500)
+def server_error(error):
+    return jsonify({"error": "Internal server error"}), 500
+
+# 应用启动配置
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(debug=False, host='0.0.0.0', port=port)
