@@ -20,7 +20,7 @@ logger = logging.getLogger('app')
 
 # 获取环境变量
 COHERE_API_KEY = os.getenv('COHERE_API_KEY', 'xeJWwYbXgmFnKDmaAHvtkcmHo2jknduhR8FPG1Dm')
-APP_API_KEY = os.getenv('APP_API_KEY')  # 用于API认证
+WP_API_KEY = os.getenv('WP_API_KEY')  # 修改为WP_API_KEY
 
 # 初始化Flask应用
 app = Flask(__name__)
@@ -33,7 +33,7 @@ def require_api_key(f):
     def decorated_function(*args, **kwargs):
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
-        if not api_key or api_key != APP_API_KEY:
+        if not api_key or api_key != WP_API_KEY:  # 修改为WP_API_KEY
             return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated_function
