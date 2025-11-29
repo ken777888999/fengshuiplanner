@@ -1,95 +1,129 @@
 import os
-import logging
-import fitz  # PyMuPDF
+import glob
+# import fitz  <-- 删除或注释掉这一行，你实际用的是 PyPDF2
+import PyPDF2
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
-import random
 
-logger = logging.getLogger(__name__)
+class KnowledgeBaseHandler:
+    def __init__(self, base_path="knowledge_base"):
+        self.base_path = base_path
+        self.books_content = {} # 缓存书籍内容，避免重复读取
+        print(f"📚 初始化知识库，路径: {self.base_path}")
 
-# 知识库路径
-KNOWLEDGE_BASE_PATH = "knowledge_base/"
+    def _clean_html(self, html_content):
+        """从EPUB的HTML中提取纯文本"""
+        soup = BeautifulSoup(html_content, 'html.parser')
+        return soup.get_text(separator=' ', strip=True)
 
-def read_pdf(file_path, max_pages=10):
-    """读取PDF文件的前几页内容"""
-    text = ""
-    try:
-        doc = fitz.open(file_path)
-        # 读取前 max_pages 页，或者文档总页数，取较小值
-        pages_to_read = min(max_pages, len(doc))
+    def _read_epub(self, file_path):
+        """读取EPUB文件内容"""
+        try:
+            book = epub.read_epub(file_path)
+            text_content = []
+            for item in book.get_items():
+                if item.get_type() == ebooklib.ITEM_DOCUMENT:
+                    text_content.append(self._clean_html(item.get_content()))
+            return " ".join(text_content)
+        except Exception as e:
+            print(f"❌ 读取 EPUB 失败 {file_path}: {e}")
+            return ""
+
+    def _read_pdf(self, file_path):
+        """读取PDF文件内容"""
+        try:
+            text_content = []
+            with open(file_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                # 为了性能，只读前50页或者每页提取，这里全读
+                for page in reader.pages:
+                    text = page.extract_text()
+                    if text:
+                        text_content.append(text)
+            return " ".join(text_content)
+        except Exception as e:
+            print(f"❌ 读取 PDF 失败 {file_path}: {e}")
+            return ""
+
+    def load_knowledge_base(self):
+        """加载所有书籍到内存中 (只在启动时运行一次)"""
+        # 查找所有 epub 和 pdf
+        epub_files = glob.glob(os.path.join(self.base_path, "*.epub"))
+        pdf_files = glob.glob(os.path.join(self.base_path, "*.pdf"))
         
-        for i in range(pages_to_read):
-            text += doc[i].get_text()
-            
-        doc.close()
-        logger.info(f"Successfully read PDF: {file_path}")
-    except Exception as e:
-        logger.error(f"Error reading PDF {file_path}: {str(e)}")
-    return text
-
-def read_epub(file_path, max_chars=5000):
-    """读取EPUB文件的部分内容"""
-    text = ""
-    try:
-        book = epub.read_epub(file_path)
-        for item in book.get_items():
-            if item.get_type() == ebooklib.ITEM_DOCUMENT:
-                # 使用BeautifulSoup去除HTML标签
-                soup = BeautifulSoup(item.get_content(), 'html.parser')
-                text += soup.get_text() + "\n"
-                # 限制长度，防止Token溢出
-                if len(text) > max_chars: 
-                    break
-        logger.info(f"Successfully read EPUB: {file_path}")
-    except Exception as e:
-        logger.error(f"Error reading EPUB {file_path}: {str(e)}")
-    return text
-
-def extract_knowledge_for_prompt():
-    """
-    从知识库中提取相关信息以增强提示词
-    """
-    combined_knowledge = ""
-    
-    try:
-        # 检查目录是否存在
-        if not os.path.exists(KNOWLEDGE_BASE_PATH):
-            logger.warning(f"Knowledge base directory not found: {KNOWLEDGE_BASE_PATH}")
-            return "Feng Shui Principles: Ensure balance of Yin and Yang."
-
-        files = [f for f in os.listdir(KNOWLEDGE_BASE_PATH) if f.endswith(('.pdf', '.epub'))]
+        all_files = epub_files + pdf_files
         
-        if not files:
-            logger.warning("No PDF or EPUB files found in knowledge base.")
-            return "Feng Shui Principles: Keep the bedroom clutter-free and ensure the bed has a solid wall behind it."
+        if not all_files:
+            print("⚠️ 警告: 在 knowledge_base 文件夹中未找到任何书籍。")
+            return
 
-        # 遍历文件并读取内容
-        # 注意：为了防止Prompt过长导致API报错或费用过高，我们限制每个文件的读取量
-        for filename in files:
-            file_path = os.path.join(KNOWLEDGE_BASE_PATH, filename)
-            content = ""
+        print(f"📚 发现 {len(all_files)} 本书，开始加载...")
+        
+        for file_path in all_files:
+            filename = os.path.basename(file_path)
+            if filename in self.books_content:
+                continue # 已经加载过
             
-            if filename.endswith('.pdf'):
-                # 读取PDF，限制页数
-                content = read_pdf(file_path, max_pages=5)
-            elif filename.endswith('.epub'):
-                # 读取EPUB，限制字符数
-                content = read_epub(file_path, max_chars=3000)
+            print(f"   正在读取: {filename}...")
+            if file_path.endswith('.epub'):
+                content = self._read_epub(file_path)
+            elif file_path.endswith('.pdf'):
+                content = self._read_pdf(file_path)
+            else:
+                content = ""
             
-            if content:
-                # 清理多余空白字符
-                content = " ".join(content.split())
-                # 截取前2000个字符作为上下文
-                excerpt = content[:2000]
-                combined_knowledge += f"\n--- Reference from Book: {filename} ---\n{excerpt}...\n"
+            # 简单的预处理：去掉过多的换行符
+            self.books_content[filename] = content.replace('\n', ' ')
+        
+        print("✅ 所有书籍加载完成！")
 
-        if not combined_knowledge:
-            return "Feng Shui Principles: Ensure good air flow and lighting."
+    def get_relevant_context(self, query, max_chars=3000):
+        """
+        根据用户的查询 (如 'bedroom', 'kitchen') 搜索书籍中的相关段落。
+        这是一个简单的关键词搜索，避免发送整本书给 AI。
+        """
+        relevant_texts = []
+        
+        # 将查询拆分为关键词 (例如 "bedroom feng shui" -> ["bedroom", "feng", "shui"])
+        # 这里简化处理，直接用整个词或者特定房间名
+        keywords = [query.lower()]
+        if "bedroom" in query.lower(): keywords.append("bed")
+        if "kitchen" in query.lower(): keywords.append("stove")
+        if "living" in query.lower(): keywords.append("sofa")
+        
+        for filename, content in self.books_content.items():
+            # 简单的滑动窗口搜索或段落搜索
+            # 这里我们寻找包含关键词的上下文片段
+            content_lower = content.lower()
+            
+            for kw in keywords:
+                start_index = content_lower.find(kw)
+                while start_index != -1:
+                    # 截取关键词前后的一段文字
+                    start = max(0, start_index - 200)
+                    end = min(len(content), start_index + 500)
+                    snippet = content[start:end]
+                    
+                    relevant_texts.append(f"--- From book: {filename} ---\n...{snippet}...\n")
+                    
+                    # 限制数量，避免太多
+                    if len(relevant_texts) > 3: 
+                        break
+                    
+                    # 寻找下一个出现位置
+                    start_index = content_lower.find(kw, start_index + 1000) # 跳过一段距离
+                
+                if len(relevant_texts) > 5: break
+            if len(relevant_texts) > 5: break
+            
+        # 组合结果，并限制总长度
+        final_context = "\n".join(relevant_texts)
+        return final_context[:max_chars]
 
-        return f"Use the following knowledge from Feng Shui books to analyze the bedroom:\n{combined_knowledge}"
-
-    except Exception as e:
-        logger.error(f"Error in extract_knowledge_for_prompt: {str(e)}")
-        # 发生错误时返回默认原则，保证程序不崩溃
-        return "Feng Shui Principles: Bed placement is crucial. Avoid mirrors facing the bed."
+# 用于测试
+if __name__ == "__main__":
+    kb = KnowledgeBaseHandler()
+    kb.load_knowledge_base()
+    context = kb.get_relevant_context("bedroom")
+    print("测试提取内容:", context[:500])
