@@ -21,8 +21,7 @@ except ImportError:
 # 加载环境变量
 load_dotenv()
 
-# --- 1. 配置日志 (来自 Code 2) ---
-# 这对于在 Render 后台排查错误非常有用
+# --- 1. 配置日志 ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -30,7 +29,19 @@ logging.basicConfig(
 logger = logging.getLogger('app')
 
 app = Flask(__name__)
-CORS(app)
+
+# --- [修改开始] 增强的 CORS 配置 ---
+# 允许所有来源，明确支持 Content-Type 和 X-API-Key
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+# 强制添加 CORS 头，解决部分浏览器预检请求(OPTIONS)失败的问题
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+# --- [修改结束] ---
 
 # --- 2. 配置 API Keys ---
 # Qwen 的 Key (用于调用 AI)
@@ -43,7 +54,7 @@ else:
 # 前端验证 Key (用于保护你的接口不被滥用)
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- 3. 初始化知识库 (来自 Code 1) ---
+# --- 3. 初始化知识库 ---
 kb_handler = None
 if HAS_KB_HANDLER:
     logger.info("🔄 正在初始化风水知识库...")
@@ -56,7 +67,7 @@ if HAS_KB_HANDLER:
 
 # --- 4. 工具函数 ---
 
-# API 密钥验证装饰器 (来自 Code 2 - 更方便，不需要额外 middleware 文件)
+# API 密钥验证装饰器
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
@@ -65,11 +76,14 @@ def require_api_key(f):
         
         # 验证 Key 是否匹配环境变量中的 WP_API_KEY
         if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
+            # 处理 OPTIONS 请求通过的情况，但这里主要是拦截实际请求
+            if request.method == 'OPTIONS':
+                return jsonify({"status": "ok"}), 200
             return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated_function
 
-# 格式化数据函数 (来自 Code 1 - 极其重要，保留方位映射)
+# 格式化数据函数
 def format_grid_data_for_ai(grid_data):
     """
     将前端传来的九宫格 JSON 数据转换为 AI 可读的文本描述。
@@ -133,7 +147,7 @@ def home():
         }
     })
 
-# 健康检查 (来自 Code 2 - Render 部署必备)
+# 健康检查
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -155,7 +169,6 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        # [修改] 虽然尝试获取 user_info，但在 Prompt 中不再强制依赖它
         user_info = data.get('userInfo', {}) 
         is_paid = data.get('isPaid', False)
 
@@ -178,11 +191,8 @@ def analyze_fengshui():
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
         # 4. 构建 Prompt
-        # 根据是否付费调整输出深度
         depth_instruction = "Provide a highly detailed, professional analysis." if is_paid else "Provide a concise but helpful analysis."
         
-        # [修改] 移除了 Birth Year, Gender, Concerns 的部分
-        # [修改] 将 Special Considerations 改为基于布局的通用建议，不再提及 Kua number
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
@@ -213,7 +223,6 @@ def analyze_fengshui():
         """
 
         # 5. 调用阿里云 Qwen API
-        # 建议使用 qwen-plus 或 qwen-max 以获得更好的逻辑推理
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
