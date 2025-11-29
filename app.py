@@ -11,7 +11,12 @@ from knowledge_base_handler import extract_knowledge_for_prompt
 
 # 1. 加载环境变量
 load_dotenv()
-DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
+
+# [修改点 1] 使用 Render 上配置的变量名 QWEN_API_KEY
+DASHSCOPE_API_KEY = os.getenv("QWEN_API_KEY")
+
+# [修改点 2] 获取用于验证前端请求的 Key (Render 上配置为 WP_API_KEY)
+EXPECTED_CLIENT_KEY = os.getenv("WP_API_KEY")
 
 # 2. 初始化 Flask 应用
 app = Flask(__name__)
@@ -21,7 +26,8 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # 4. 允许跨域请求
-CORS(app)
+# 建议：在生产环境中，最好限制 origins 为你的实际域名
+CORS(app) 
 
 # --- 辅助函数：将九宫格数据转换为自然语言描述 ---
 def interpret_grid_data(grid_data):
@@ -50,12 +56,6 @@ def interpret_grid_data(grid_data):
     for pos_key, items in grid_data.items():
         pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
         
-        # 提取物品 (List of strings)
-        # 注意：前端传来的 items 是一个数组，可能包含字符串(物品)
-        # 前端 JS 逻辑：gridData[position].push(el.type)
-        # 另外 JS 中 gridData[position].areaTypes 是附加属性，JSON序列化时可能会丢失
-        # 我们主要处理物品列表
-        
         elements = []
         area_types = []
         
@@ -80,38 +80,46 @@ def interpret_grid_data(grid_data):
 def health_check():
     return jsonify({"status": "healthy", "service": "Feng Shui AI API"}), 200
 
-# --- 核心接口：名称已修正为 /analyze-fengshui 以匹配前端 ---
+# --- 核心接口 ---
 @app.route('/analyze-fengshui', methods=['POST'])
 def analyze_fengshui():
     
+    # 1. 检查服务器端 API Key 配置
     if not DASHSCOPE_API_KEY:
-        logger.error("DASHSCOPE_API_KEY is missing.")
+        logger.error("QWEN_API_KEY (DASHSCOPE_API_KEY) is missing in environment variables.")
         return jsonify({"success": False, "error": "Server configuration error"}), 500
+
+    # 2. [新增] 验证前端传来的 Key，防止被盗刷
+    # 前端 JS 会在 header 中发送 'X-API-Key': 'FengShuiApiKey2025Simple'
+    client_key = request.headers.get('X-API-Key')
+    
+    # 如果 Render 上配置了 WP_API_KEY，则进行验证
+    if EXPECTED_CLIENT_KEY and client_key != EXPECTED_CLIENT_KEY:
+        logger.warning(f"Unauthorized access attempt. Received: {client_key}, Expected: {EXPECTED_CLIENT_KEY}")
+        return jsonify({"success": False, "error": "Unauthorized: Invalid API Key"}), 401
 
     try:
         data = request.get_json()
         if not data:
             return jsonify({"success": False, "error": "No data provided"}), 400
 
-        # 1. 解析前端数据
-        # 前端传参结构: { gridData: {...}, userInfo: {...}, isPaid: bool, ... }
+        # 3. 解析前端数据
         grid_data = data.get('gridData', {})
         user_info = data.get('userInfo', {})
-        is_paid = data.get('isPaid', False)  # 对应前端 IS_PREMIUM_USER
+        is_paid = data.get('isPaid', False)
         
-        # 提取用户关注点
         concerns = user_info.get('concerns', 'General wellness and harmony')
         birth_year = user_info.get('birthYear', 'Not specified')
 
-        # 2. 将 Grid 数据翻译成文本
+        # 4. 将 Grid 数据翻译成文本
         room_description = interpret_grid_data(grid_data)
         
         logger.info(f"Analyzing request. Premium: {is_paid}. Layout: {room_description[:50]}...")
 
-        # 3. 读取书籍知识库
+        # 5. 读取书籍知识库
         feng_shui_knowledge = extract_knowledge_for_prompt()
         
-        # 4. 构建 Prompt
+        # 6. 构建 Prompt
         depth = "deep, comprehensive, and explicitly detailed" if is_paid else "basic and general"
         
         prompt = f"""
@@ -152,14 +160,14 @@ def analyze_fengshui():
         {'IMPORTANT: Since this is a Premium user, give extremely specific advice.' if is_paid else 'IMPORTANT: Since this is a Free user, keep the advice helpful but brief. Do not give advanced cures.'}
         """
 
-        # 5. 调用阿里云 Qwen API
+        # 7. 调用阿里云 Qwen API
         url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "qwen-plus", # 建议使用 qwen-plus 获得更好的逻辑分析能力
+            "model": "qwen-plus",
             "input": {
                 "messages": [
                     {"role": "system", "content": "You are an expert Feng Shui Master."},
@@ -177,8 +185,6 @@ def analyze_fengshui():
             result = response.json()
             if "output" in result and "text" in result["output"]:
                 ai_analysis = result["output"]["text"]
-                
-                # --- 关键修正：返回格式必须匹配前端 processAnalysisResponse ---
                 return jsonify({
                     "success": True, 
                     "analysis": ai_analysis
