@@ -4,8 +4,8 @@ python-dotenv==1.0.0
 Werkzeug==2.3.7
 requests==2.31.0
 flask-cors==4.0.0
-dashscope==1.14.0
+# 建议将 dashscope 升级到最新版或去掉版本号，以支持 qwen-plus/max 的最新特性
+dashscope>=1.19.0
 EbookLib==0.18
 BeautifulSoup4==4.12.2
 PyPDF2==3.0.1
-
