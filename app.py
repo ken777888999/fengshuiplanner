@@ -24,7 +24,16 @@ WP_API_KEY = os.getenv('WP_API_KEY')
 
 # 初始化Flask应用
 app = Flask(__name__)
-CORS(app)  # 启用CORS
+# 更新CORS配置，明确指定允许的源
+CORS(app, origins=["https://fengshuispaceplanner.com"], supports_credentials=True)
+
+# 额外的CORS处理
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', 'https://fengshuispaceplanner.com')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # API密钥验证装饰器
 def require_api_key(f):
