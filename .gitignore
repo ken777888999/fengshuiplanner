@@ -5,44 +5,16 @@
 __pycache__/
 *.py[cod]
 *$py.class
-*.so
-.Python
-env/
-build/
-develop-eggs/
-dist/
-downloads/
-eggs/
-.eggs/
-lib/
-lib64/
-parts/
-sdist/
-var/
-*.egg-info/
-.installed.cfg
-*.egg
-
-# 虚拟环境
-venv/
-ENV/
-env/
-
-# IDE文件
-.idea/
-.vscode/
-*.swp
-*.swo
+# ... (中间保持不变) ...
 
 # 操作系统文件
 .DS_Store
 Thumbs.db
 
-# 知识库文件 (确保不将PDF上传到Git)
-knowledge_base/*.pdf
-knowledge_base/*.epub
+# 知识库文件 (!!! 重要修改：注释掉下面两行，允许上传书籍 !!!)
+# knowledge_base/*.pdf
+# knowledge_base/*.epub
 
 # 日志文件
 logs/
-
 *.log
