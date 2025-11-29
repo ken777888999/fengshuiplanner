@@ -1,11 +1,12 @@
 import os
 import logging
+import json
 import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 
-# 引入知识库处理模块 (确保 knowledge_base_handler.py 在同一目录下)
+# 引入知识库处理模块
 from knowledge_base_handler import extract_knowledge_for_prompt
 
 # 1. 加载环境变量
@@ -15,93 +16,153 @@ DASHSCOPE_API_KEY = os.getenv("DASHSCOPE_API_KEY")
 # 2. 初始化 Flask 应用
 app = Flask(__name__)
 
-# 3. 配置日志 (方便在 Render 后台看报错)
+# 3. 配置日志
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# 4. 允许跨域请求 (允许 WordPress 前端访问)
+# 4. 允许跨域请求
 CORS(app)
+
+# --- 辅助函数：将九宫格数据转换为自然语言描述 ---
+def interpret_grid_data(grid_data):
+    """
+    将前端传来的 gridData (JSON对象) 转换为 AI 可读的文本描述。
+    映射关系参考前端 HTML 的 Bagua Grid。
+    """
+    if not grid_data:
+        return "User has not provided a specific layout."
+
+    # 九宫格位置映射
+    position_map = {
+        "1": "Northwest (NW) - Helpful People & Travel sector",
+        "2": "North (N) - Career & Life Path sector",
+        "3": "Northeast (NE) - Skills & Knowledge sector",
+        "4": "West (W) - Creativity & Children sector",
+        "5": "Center (C) - Health & Wellbeing (Tai Chi) sector",
+        "6": "East (E) - Family & Health sector",
+        "7": "Southwest (SW) - Love & Relationships sector",
+        "8": "South (S) - Fame & Reputation sector",
+        "9": "Southeast (SE) - Wealth & Prosperity sector"
+    }
+
+    description_lines = []
+    
+    for pos_key, items in grid_data.items():
+        pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
+        
+        # 提取物品 (List of strings)
+        # 注意：前端传来的 items 是一个数组，可能包含字符串(物品)
+        # 前端 JS 逻辑：gridData[position].push(el.type)
+        # 另外 JS 中 gridData[position].areaTypes 是附加属性，JSON序列化时可能会丢失
+        # 我们主要处理物品列表
+        
+        elements = []
+        area_types = []
+        
+        # 尝试解析 items
+        if isinstance(items, list):
+            elements = [item for item in items if isinstance(item, str)]
+        elif isinstance(items, dict):
+            # 防御性编程，以防数据结构变化
+            elements = items.get('elements', [])
+            area_types = items.get('areaTypes', [])
+
+        if elements:
+            formatted_elements = ", ".join(elements).replace("bed", "Bed").replace("door", "Door").replace("mirror", "Mirror")
+            description_lines.append(f"- In the {pos_name}, there is: {formatted_elements}.")
+            
+    if not description_lines:
+        return "The bedroom layout is empty."
+        
+    return "\n".join(description_lines)
 
 @app.route('/health', methods=['GET'])
 def health_check():
-    """健康检查接口，用于 Render 确认服务是否存活"""
     return jsonify({"status": "healthy", "service": "Feng Shui AI API"}), 200
 
-@app.route('/analyze', methods=['POST'])
+# --- 核心接口：名称已修正为 /analyze-fengshui 以匹配前端 ---
+@app.route('/analyze-fengshui', methods=['POST'])
 def analyze_fengshui():
-    """核心分析接口"""
     
-    # 检查 API Key 是否存在
     if not DASHSCOPE_API_KEY:
-        logger.error("DASHSCOPE_API_KEY is missing in environment variables.")
-        return jsonify({"error": "Server configuration error: API Key missing"}), 500
+        logger.error("DASHSCOPE_API_KEY is missing.")
+        return jsonify({"success": False, "error": "Server configuration error"}), 500
 
     try:
-        # 获取前端发送的数据
         data = request.get_json()
         if not data:
-            return jsonify({"error": "No data provided"}), 400
+            return jsonify({"success": False, "error": "No data provided"}), 400
 
-        room_description = data.get('roomDescription', '')
-        concerns = data.get('concerns', '')
-        # 暂时跳过复杂的支付验证，直接读取前端传来的布尔值 (默认为 False)
-        is_paid = data.get('isPremium', False)
+        # 1. 解析前端数据
+        # 前端传参结构: { gridData: {...}, userInfo: {...}, isPaid: bool, ... }
+        grid_data = data.get('gridData', {})
+        user_info = data.get('userInfo', {})
+        is_paid = data.get('isPaid', False)  # 对应前端 IS_PREMIUM_USER
+        
+        # 提取用户关注点
+        concerns = user_info.get('concerns', 'General wellness and harmony')
+        birth_year = user_info.get('birthYear', 'Not specified')
 
-        logger.info(f"Received request. Premium: {is_paid}")
+        # 2. 将 Grid 数据翻译成文本
+        room_description = interpret_grid_data(grid_data)
+        
+        logger.info(f"Analyzing request. Premium: {is_paid}. Layout: {room_description[:50]}...")
 
-        # --- 关键步骤：从真实书籍中提取知识 ---
-        # 这会去读取 knowledge_base 文件夹里的 PDF/EPUB
+        # 3. 读取书籍知识库
         feng_shui_knowledge = extract_knowledge_for_prompt()
         
-        # 确定分析深度
-        depth = "comprehensive and detailed" if is_paid else "basic and concise"
+        # 4. 构建 Prompt
+        depth = "deep, comprehensive, and explicitly detailed" if is_paid else "basic and general"
         
-        # --- 构建提示词 (Prompt) ---
-        # 结构化 Prompt，让 AI 更好地区分“用户情况”和“参考书内容”
         prompt = f"""
-        Role: You are a professional Feng Shui Master.
+        Role: You are a master Feng Shui consultant combining Form School and Compass School methods.
         
-        Task: Analyze the user's bedroom layout based STRICTLY on the provided [Reference Knowledge Base] and general Feng Shui principles.
+        Task: Analyze the user's bedroom layout based on the provided [Reference Knowledge Base] and the [User's Layout].
 
-        [User's Bedroom Layout]
+        [User's Profile]
+        - Birth Year: {birth_year}
+        - Primary Concerns: {concerns}
+
+        [User's Bedroom Layout Description]
         {room_description}
         
-        [User's Specific Concerns]
-        {concerns}
-        
-        [Reference Knowledge Base (From uploaded books)]
+        [Reference Knowledge Base (Strictly adhere to these principles)]
         {feng_shui_knowledge}
         
-        [Output Instructions]
-        Provide a {depth} Feng Shui analysis.
-        Please format your response using the following Markdown headers:
+        [Output Format Requirements]
+        You must respond in Markdown format with exactly these headers:
         
         ## Positive Aspects
-        (Identify elements that align with the principles in the reference texts)
+        (List 2-3 strengths of the layout)
         
         ## Areas for Improvement
-        (Identify conflicts with the principles in the reference texts)
+        (List the negative aspects or conflicts found in the layout)
         
         ## Recommended Changes
-        (Provide 3-5 actionable steps)
+        (Provide actionable advice to fix the issues)
         
         ## Special Considerations
-        (Personalized advice based on user concerns)
+        (Address the user's specific concerns: {concerns})
         
-        {'IMPORTANT: Since this is a Premium user, provide advanced remedies, specific object placement advice, and explain the "Why" behind the principles.' if is_paid else 'IMPORTANT: Since this is a Free user, keep the advice general and brief. Do not go into deep detail.'}
+        {'## Premium Deep Dive' if is_paid else ''}
+        {'(Provide advanced cures, element balancing advice, and "Why" it works)' if is_paid else ''}
+
+        [Tone]
+        Professional, encouraging, and mystical yet practical.
+        {'IMPORTANT: Since this is a Premium user, give extremely specific advice.' if is_paid else 'IMPORTANT: Since this is a Free user, keep the advice helpful but brief. Do not give advanced cures.'}
         """
 
-        # --- 调用阿里云 Qwen (通义千问) API ---
+        # 5. 调用阿里云 Qwen API
         url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
         headers = {
             "Authorization": f"Bearer {DASHSCOPE_API_KEY}",
             "Content-Type": "application/json"
         }
         payload = {
-            "model": "qwen-turbo",  # 或者使用 qwen-plus 获得更好效果
+            "model": "qwen-plus", # 建议使用 qwen-plus 获得更好的逻辑分析能力
             "input": {
                 "messages": [
-                    {"role": "system", "content": "You are a helpful and wise Feng Shui consultant."},
+                    {"role": "system", "content": "You are an expert Feng Shui Master."},
                     {"role": "user", "content": prompt}
                 ]
             },
@@ -116,18 +177,22 @@ def analyze_fengshui():
             result = response.json()
             if "output" in result and "text" in result["output"]:
                 ai_analysis = result["output"]["text"]
-                return jsonify({"result": ai_analysis})
+                
+                # --- 关键修正：返回格式必须匹配前端 processAnalysisResponse ---
+                return jsonify({
+                    "success": True, 
+                    "analysis": ai_analysis
+                })
             else:
-                logger.error(f"Unexpected API response structure: {result}")
-                return jsonify({"error": "Failed to parse AI response"}), 500
+                logger.error(f"Unexpected API response: {result}")
+                return jsonify({"success": False, "error": "Failed to parse AI response"}), 500
         else:
             logger.error(f"API Error: {response.status_code} - {response.text}")
-            return jsonify({"error": "AI Service currently unavailable"}), 500
+            return jsonify({"success": False, "error": "AI Service unavailable"}), 500
 
     except Exception as e:
         logger.error(f"Server Error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 if __name__ == '__main__':
-    # 本地运行时开启 Debug 模式
     app.run(debug=True, port=5000)
