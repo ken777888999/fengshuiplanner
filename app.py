@@ -1,12 +1,12 @@
 import os
 import time
 import logging
-import google.generativeai as genai
+import requests
 from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 from functools import wraps
-from knowledge_base_handler import extract_knowledge_for_prompt  # 新增：导入知识库处理函数
+from knowledge_base_handler import extract_knowledge_for_prompt
 
 # 加载环境变量
 load_dotenv()
@@ -18,9 +18,9 @@ logging.basicConfig(
 )
 logger = logging.getLogger('app')
 
-# 获取环境变量
-GEMINI_API_KEY = os.getenv('GEMINI_API_KEY')
-WP_API_KEY = os.getenv('WP_API_KEY')  # 使用与现有Render配置相同的变量名
+# 获取环境变量 - 移除默认值，完全依赖环境变量
+QWEN_API_KEY = os.getenv('QWEN_API_KEY')
+WP_API_KEY = os.getenv('WP_API_KEY')
 
 # 初始化Flask应用
 app = Flask(__name__)
@@ -37,115 +37,85 @@ def require_api_key(f):
         return f(*args, **kwargs)
     return decorated_function
 
-# 初始化Gemini模型
-def init_model():
-    """Initialize Gemini model with comprehensive error handling"""
+# 通义千问API配置 - 北京地域
+QWEN_API_URL = "https://dashscope.aliyuncs.com/compatible-mode/v1/chat/completions"
+
+# 定义通义千问API调用函数
+def generate_with_qwen(prompt, max_tokens=1000, temperature=0.7, is_paid=False):
+    """使用通义千问API生成内容"""
     try:
-        # 检查API密钥
-        if not GEMINI_API_KEY or GEMINI_API_KEY == "your_api_key_here":
-            logger.error("GEMINI_API_KEY not properly set")
-            return None
+        if not QWEN_API_KEY:
+            logger.error("QWEN_API_KEY not set")
+            return None, "API key not configured"
+        
+        # 根据是否付费用户调整最大token数
+        actual_max_tokens = max_tokens if is_paid else min(max_tokens, 800)
+        
+        # 构建请求数据 - 使用兼容模式格式
+        payload = {
+            "model": "qwen-plus-latest",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": actual_max_tokens,
+            "temperature": temperature,
+            "top_p": 0.8
+        }
+        
+        # 设置请求头
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {QWEN_API_KEY}"
+        }
+        
+        # 发送请求
+        logger.info("Sending request to Qwen API")
+        response = requests.post(QWEN_API_URL, json=payload, headers=headers)
+        
+        # 检查响应状态
+        if response.status_code == 200:
+            result = response.json()
             
-        # 配置生成式AI
-        logger.info("Configuring Google Generative AI")
-        genai.configure(
-            api_key=GEMINI_API_KEY,
-            client_options={
-                'api_endpoint': 'generativelanguage.googleapis.com'
-            }
-        )
-        
-        # 首先列出可用的模型进行调试
-        try:
-            logger.info("Attempting to list available models...")
-            models = genai.list_models()
-            available_models = [model.name for model in models]
-            logger.info(f"Available models: {available_models}")
-        except Exception as e:
-            logger.warning(f"Could not list models: {str(e)}")
-            available_models = []
-        
-        # 尝试不同的模型名称
-        model_names = [
-            'gemini-1.5-pro',
-            'gemini-1.0-pro', 
-            'gemini-pro',
-            'models/gemini-pro'
-        ]
-        
-        # 如果列出可用模型成功，优先尝试可用的模型
-        if available_models:
-            for available_model in available_models:
-                if "gemini" in available_model.lower() and "pro" in available_model.lower():
-                    try:
-                        logger.info(f"Trying available model: {available_model}")
-                        model_name = available_model.split("/")[-1] if "/" in available_model else available_model
-                        model = genai.GenerativeModel(model_name)
-                        # 测试连接
-                        response = model.generate_content("Test connection")
-                        if response and hasattr(response, 'text'):
-                            logger.info(f"Successfully initialized available model: {model_name}")
-                            return model
-                    except Exception as e:
-                        logger.warning(f"Available model {model_name} failed: {str(e)}")
-                        continue
-        
-        # 如果可用模型没有成功，尝试常见模型名称
-        for model_name in model_names:
-            try:
-                logger.info(f"Trying standard model name: {model_name}")
-                model = genai.GenerativeModel(model_name)
-                # 使用明确的配置测试连接
-                response = model.generate_content(
-                    "Test connection",
-                    generation_config=genai.types.GenerationConfig(
-                        temperature=0.1,
-                        max_output_tokens=10
-                    )
-                )
-                if response and hasattr(response, 'text'):
-                    logger.info(f"Successfully initialized model: {model_name}")
-                    return model
-            except Exception as e:
-                logger.warning(f"Model {model_name} failed: {str(e)}")
-                continue
+            # 解析结果 - 兼容模式格式
+            if "choices" in result and len(result["choices"]) > 0:
+                message = result["choices"][0].get("message", {})
+                generated_text = message.get("content", "")
+                return generated_text, None
+            else:
+                logger.error(f"Unexpected response structure: {result}")
+                return None, "Unexpected API response format"
                 
-        # 如果所有尝试都失败
-        logger.error(f"All model attempts failed: {', '.join(model_names)}")
-        return None
-        
+        else:
+            error_detail = response.json() if response.content else "No details"
+            logger.error(f"API error: {response.status_code}, {error_detail}")
+            return None, f"API error {response.status_code}: {error_detail}"
+            
     except Exception as e:
-        logger.error(f"Failed to initialize Gemini model: {str(e)}")
-        return None
+        logger.exception(f"Exception in generate_with_qwen: {str(e)}")
+        return None, str(e)
 
-# 初始化模型
-gemini_model = init_model()
-
-# 风水分析函数 - 修改部分：风水报告结构和知识库调用
+# 风水分析函数 - 修改为使用通义千问API
 def analyze_fengshui(grid_data, user_info, is_paid=False):
     """风水分析逻辑"""
     try:
-        if not gemini_model:
-            return {
-                "error": "Gemini model not available",
-                "fallback_response": "Service temporarily unavailable"
-            }, 503
-
-        # 构建提示词
+        # 构建房间描述
         room_description = ""
         for position, items in grid_data.items():
-            if items:
+            if items and isinstance(items, list):
                 room_description += f"Position {position}: {', '.join(items)}. "
 
         concerns = user_info.get('concerns', 'general feng shui')
         
-        # 新增：从知识库获取专业知识
+        # 从知识库获取专业知识
         feng_shui_knowledge = extract_knowledge_for_prompt()
         
         # 根据是否付费用户提供不同深度的分析
         depth = "detailed" if is_paid else "basic"
         
-        # 修改：更新提示词结构，包含知识库内容和结构化输出
+        # 构建提示词
         prompt = f"""
         As a Feng Shui expert, analyze this room arrangement:
         {room_description}
@@ -157,41 +127,38 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
         Provide a {depth} Feng Shui analysis formatted in these four sections with their respective headings:
         
         ## Positive Aspects
-
         List the positive aspects and elements that follow good Feng Shui principles in the bedroom.
         
         ## Areas for Improvement
-
         Point out problems and elements that don't follow good Feng Shui principles.
         
         ## Recommended Changes
-
         Provide 3-5 specific suggestions for improvement, preferably in a list format.
         
         ## Special Considerations
-
         Offer more personalized advice based on the user's specific situation.
         
         {' Include advanced remedies and specific timing recommendations in your analysis.' if is_paid else 'For the non-paid version, keep the analysis brief but insightful.'}
         """
 
-        # 生成配置
-        generation_config = genai.types.GenerationConfig(
+        # 调用通义千问API生成分析
+        max_tokens = 1500 if is_paid else 800
+        generated_text, error = generate_with_qwen(
+            prompt=prompt, 
+            max_tokens=max_tokens,
             temperature=0.7,
-            max_output_tokens=1000 if is_paid else 500,
-            top_p=0.95,
-            top_k=40
+            is_paid=is_paid
         )
-
-        # 生成分析
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config=generation_config
-        )
-
+        
+        if error:
+            return {
+                "error": f"Analysis failed: {error}",
+                "fallback_response": "Unable to complete analysis. Please try again."
+            }, 500
+        
         return {
             "success": True,
-            "analysis": response.text,
+            "analysis": generated_text,
             "type": "detailed" if is_paid else "basic"
         }
 
@@ -202,35 +169,28 @@ def analyze_fengshui(grid_data, user_info, is_paid=False):
             "fallback_response": "Unable to complete analysis. Please try again."
         }, 500
 
-# API信息端点
+# API信息端点 - 更新为提供通义千问信息
 @app.route('/api-info', methods=['GET'])
 @require_api_key
 def api_info():
-    """提供API版本和可用模型的信息"""
+    """提供API版本和模型信息"""
     try:
         info = {
-            "library_version": genai.__version__,
-            "available_models": []
+            "api": "Qwen API Service",
+            "model": "qwen-plus-latest",
+            "version": "1.0",
+            "region": "Beijing",
+            "service_provider": "Aliyun Dashscope"
         }
-        
-        try:
-            models = genai.list_models()
-            info["available_models"] = [
-                {"name": m.name, "display_name": getattr(m, "display_name", "Unknown")}
-                for m in models
-            ]
-        except Exception as e:
-            info["models_error"] = str(e)
-            
         return jsonify(info)
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-# 生成文本端点
+# 生成文本端点 - 更新为使用通义千问API
 @app.route('/generate', methods=['POST'])
 @require_api_key
 def generate_text():
-    """使用Gemini模型生成文本"""
+    """使用通义千问模型生成文本"""
     try:
         data = request.json
         
@@ -241,40 +201,28 @@ def generate_text():
         prompt = data.get('prompt')
         temperature = float(data.get('temperature', 0.7))
         max_tokens = int(data.get('max_tokens', 800))
+        is_paid = bool(data.get('isPaid', False))
         
-        # 检查模型是否可用
-        if not gemini_model:
+        # 使用通义千问API生成文本
+        generated_text, error = generate_with_qwen(
+            prompt=prompt,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            is_paid=is_paid
+        )
+        
+        if error:
             return jsonify({
-                "error": "Gemini model not available",
-                "fallback_response": "Gemini API is currently unavailable. Please try again later."
-            }), 503
-            
-        # 生成文本
-        try:
-            generation_config = genai.types.GenerationConfig(
-                temperature=temperature,
-                max_output_tokens=max_tokens,
-                top_p=0.95,
-                top_k=40
-            )
-            
-            response = gemini_model.generate_content(
-                prompt,
-                generation_config=generation_config
-            )
-            
-            # 返回结果
-            return jsonify({
-                "success": True,
-                "generated_text": response.text,
-                "model_used": gemini_model._model_name
-            })
-        except Exception as e:
-            logger.error(f"Text generation error: {str(e)}")
-            return jsonify({
-                "error": f"Text generation failed: {str(e)}",
-                "fallback_response": "Failed to generate text with Gemini. Please try a different prompt."
+                "error": f"Text generation failed: {error}",
+                "fallback_response": "Failed to generate text. Please try a different prompt."
             }), 500
+            
+        # 返回结果
+        return jsonify({
+            "success": True,
+            "generated_text": generated_text,
+            "model_used": "qwen-plus-latest"
+        })
             
     except Exception as e:
         logger.error(f"Request processing error: {str(e)}")
@@ -352,48 +300,40 @@ def health_check():
     """健康检查端点"""
     status = {
         "status": "ok",
-        "gemini_model_available": gemini_model is not None,
+        "model": "qwen-plus-latest",
+        "api_provider": "Aliyun Dashscope",
+        "region": "Beijing",
         "timestamp": time.time()
     }
     return jsonify(status)
 
-# 重新初始化模型端点
+# 保留接口以保持兼容性
 @app.route('/reinitialize', methods=['POST'])
 @require_api_key
 def reinitialize_model():
-    """重新初始化模型"""
-    try:
-        global gemini_model
-        gemini_model = init_model()
-        
-        if gemini_model:
-            return jsonify({
-                "success": True,
-                "message": "Model reinitialized successfully",
-                "model_used": gemini_model._model_name
-            })
-        else:
-            return jsonify({
-                "success": False,
-                "message": "Model reinitialization failed"
-            }), 500
-    except Exception as e:
-        logger.error(f"Reinitialization error: {str(e)}")
-        return jsonify({"error": str(e)}), 500
+    """通义千问不需要重新初始化，但为了兼容性保留此端点"""
+    return jsonify({
+        "success": True,
+        "message": "API doesn't require reinitialization",
+        "model_used": "qwen-plus-latest"
+    })
 
 # 主页面
 @app.route('/', methods=['GET'])
 def index():
     """API主页"""
     return jsonify({
-        "api": "Gemini API Service",
+        "api": "Feng Shui Analysis API",
         "version": "1.0",
+        "model": "通义千问-Plus-Latest",
+        "region": "Beijing",
+        "provider": "Aliyun Dashscope",
         "endpoints": {
             "/analyze-fengshui": "Analyze Feng Shui arrangement (POST)",
-            "/generate": "Generate text with Gemini (POST)",
+            "/generate": "Generate text with Qwen model (POST)",
             "/api-info": "Get API and model information (GET)",
             "/health": "Health check (GET)",
-            "/reinitialize": "Reinitialize model (POST)",
+            "/reinitialize": "Service maintenance endpoint (POST)",
             "/fengshui-positions": "Get Feng Shui position information (GET)"
         }
     })
