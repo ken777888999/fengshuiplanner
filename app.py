@@ -155,12 +155,13 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        user_info = data.get('userInfo', {})
+        # [修改] 虽然尝试获取 user_info，但在 Prompt 中不再强制依赖它
+        user_info = data.get('userInfo', {}) 
         is_paid = data.get('isPaid', False)
 
         # 2. 转换数据为文本描述
         room_description = format_grid_data_for_ai(grid_data)
-        logger.info(f"📝 Analyzing room for user (Paid: {is_paid})")
+        logger.info(f"📝 Analyzing room (Paid: {is_paid})")
         
         # 3. 获取知识库上下文 (动态检索)
         search_query = "bedroom feng shui layout bed position"
@@ -180,6 +181,8 @@ def analyze_fengshui():
         # 根据是否付费调整输出深度
         depth_instruction = "Provide a highly detailed, professional analysis." if is_paid else "Provide a concise but helpful analysis."
         
+        # [修改] 移除了 Birth Year, Gender, Concerns 的部分
+        # [修改] 将 Special Considerations 改为基于布局的通用建议，不再提及 Kua number
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
@@ -192,11 +195,6 @@ def analyze_fengshui():
         
         Layout Description:
         {room_description}
-        
-        User Info:
-        Birth Year: {user_info.get('birthYear', 'Unknown')}
-        Gender: {user_info.get('gender', 'Unknown')}
-        Concerns: {user_info.get('concerns', 'General Well-being')}
         
         Instruction: {depth_instruction}
         
@@ -211,7 +209,7 @@ def analyze_fengshui():
         (Actionable advice. If paid user, give specific remedies like 'add a metal wu lou'.)
         
         ## Special Considerations
-        (Brief advice based on birth year/Kua number if applicable)
+        (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
         # 5. 调用阿里云 Qwen API
