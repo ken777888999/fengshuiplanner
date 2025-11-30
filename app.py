@@ -9,8 +9,7 @@ from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
 
-# 引入自定义模块 (确保 knowledge_base_handler.py 在同一目录下)
-# 如果没有这个文件，请注释掉相关行，我会提供一个降级方案
+# 引入自定义模块
 try:
     from knowledge_base_handler import KnowledgeBaseHandler
     HAS_KB_HANDLER = True
@@ -30,29 +29,29 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- [修改开始] 增强的 CORS 配置 ---
-# 允许所有来源，明确支持 Content-Type 和 X-API-Key
+# --- 增强的 CORS 配置 ---
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# 强制添加 CORS 头，解决部分浏览器预检请求(OPTIONS)失败的问题
 @app.after_request
 def after_request(response):
     response.headers.add('Access-Control-Allow-Origin', '*')
     response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
     response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
     return response
-# --- [修改结束] ---
 
 # --- 2. 配置 API Keys ---
-# Qwen 的 Key (用于调用 AI)
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 if not QWEN_API_KEY:
     logger.error("⚠️ 严重警告: 未检测到 QWEN_API_KEY，AI 功能将无法使用。")
 else:
     dashscope.api_key = QWEN_API_KEY
 
-# 前端验证 Key (用于保护你的接口不被滥用)
 WP_API_KEY = os.getenv('WP_API_KEY')
+
+# --- [新增] 商品推广配置 ---
+# 你可以在这里修改你想推广的商品名称和链接
+PROMO_PRODUCT_NAME = "Tai Sui Protection Talisman"  # 商品名称 (太岁符/平安符)
+PROMO_PRODUCT_URL = "https://your-shop-domain.com/products/tai-sui-talisman" # 商品链接占位符
 
 # --- 3. 初始化知识库 ---
 kb_handler = None
@@ -67,27 +66,18 @@ if HAS_KB_HANDLER:
 
 # --- 4. 工具函数 ---
 
-# API 密钥验证装饰器
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # 尝试从 Header 或 URL 参数获取 Key
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        # 验证 Key 是否匹配环境变量中的 WP_API_KEY
         if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
-            # 处理 OPTIONS 请求通过的情况，但这里主要是拦截实际请求
             if request.method == 'OPTIONS':
                 return jsonify({"status": "ok"}), 200
             return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated_function
 
-# 格式化数据函数
 def format_grid_data_for_ai(grid_data):
-    """
-    将前端传来的九宫格 JSON 数据转换为 AI 可读的文本描述。
-    """
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
         "2": "North (N) - Career Luck (Kan Trigram)",
@@ -101,12 +91,9 @@ def format_grid_data_for_ai(grid_data):
     }
     
     description = []
-    
     for pos_key, cell_data in grid_data.items():
         items = []
         area_types = []
-
-        # 健壮性处理：确保能解析字典结构
         if isinstance(cell_data, dict):
             items = cell_data.get('items', [])
             area_types = cell_data.get('areaTypes', [])
@@ -117,7 +104,6 @@ def format_grid_data_for_ai(grid_data):
             continue
             
         pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
-        
         desc_parts = []
         if items:
             readable_items = [("Sleeping Bed" if i == 'bed' else i.capitalize()) for i in items]
@@ -131,7 +117,6 @@ def format_grid_data_for_ai(grid_data):
             
     if not description:
         return "The room is currently empty."
-        
     return "\n".join(description)
 
 # --- 5. 路由定义 ---
@@ -147,7 +132,6 @@ def home():
         }
     })
 
-# 健康检查
 @app.route('/health', methods=['GET'])
 def health_check():
     return jsonify({
@@ -160,23 +144,20 @@ def health_check():
 @require_api_key
 def analyze_fengshui():
     """
-    核心分析接口 (使用 Qwen 模型 + 健壮的错误处理)
+    核心分析接口
     """
     try:
-        # 1. 获取并验证数据
         data = request.json
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        user_info = data.get('userInfo', {}) 
         is_paid = data.get('isPaid', False)
 
-        # 2. 转换数据为文本描述
         room_description = format_grid_data_for_ai(grid_data)
         logger.info(f"📝 Analyzing room (Paid: {is_paid})")
         
-        # 3. 获取知识库上下文 (动态检索)
+        # 检索知识库
         search_query = "bedroom feng shui layout bed position"
         if "mirror" in room_description.lower():
             search_query += " mirror facing bed"
@@ -190,8 +171,9 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # 4. 构建 Prompt
-        depth_instruction = "Provide a highly detailed, professional analysis." if is_paid else "Provide a concise but helpful analysis."
+        # --- Prompt 构建 (包含商品植入逻辑) ---
+        
+        depth_instruction = "Provide a highly detailed, professional analysis with specific actionable advice. Make the user feel the value of the report."
         
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
@@ -210,19 +192,26 @@ def analyze_fengshui():
         
         Output Format (Markdown):
         ## Positive Aspects
-        (List 2-3 good points found in the layout)
+        (List 2-3 good points found in the layout. Be detailed.)
         
         ## Areas for Improvement
-        (Identify clashes, e.g., mirrors facing bed, bed in death line. Be strict.)
+        (Identify clashes, e.g., mirrors facing bed. Be strict.)
         
         ## Recommended Changes
-        (Actionable advice. If paid user, give specific remedies like 'add a metal wu lou'.)
+        (Actionable advice. Give specific remedies like 'move bed to East'. 
+        
+        IMPORTANT MARKETING INSTRUCTION:
+        Regardless of the specific layout, you MUST recommend using a specific spiritual item to neutralize general negative energy and boost luck.
+        Specifically, recommend the '{PROMO_PRODUCT_NAME}'.
+        When mentioning it, you MUST use this exact Markdown link format: [{PROMO_PRODUCT_NAME}]({PROMO_PRODUCT_URL}).
+        Explain briefly why this specific talisman helps (e.g., balancing the magnetic field).
+        )
         
         ## Special Considerations
-        (Provide general advice on energy flow and room balance based on the layout provided.)
+        (Provide general advice on energy flow.)
         """
 
-        # 5. 调用阿里云 Qwen API
+        # 调用 AI
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -232,7 +221,6 @@ def analyze_fengshui():
             result_format='message'
         )
 
-        # 6. 处理响应
         if response.status_code == HTTPStatus.OK:
             analysis_result = response.output.choices[0].message.content
             return jsonify({
