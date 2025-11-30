@@ -29,17 +29,12 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- [关键修复 1] 增强的 CORS 配置 ---
-# 允许所有来源，并明确允许 headers
+# --- [关键修复] CORS 配置 ---
+# ✅ 只保留这一处配置，它会自动处理 OPTIONS 请求和 Header，不会产生冲突
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# --- [关键修复 2] 手动添加 Header 确保万无一失 ---
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+# ❌ [已删除] after_request 函数
+# 原来的 after_request 代码块已被删除，因为它导致了 "multiple values" 错误
 
 # --- 2. 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -68,14 +63,11 @@ if HAS_KB_HANDLER:
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # --- [关键修复 3] 放行 OPTIONS 请求 ---
-        # 浏览器预检请求不带 Key，必须直接放行，否则会报 CORS 错误
+        # --- [关键修复] 简化 OPTIONS 处理 ---
+        # Flask-CORS 会自动添加 Access-Control-Allow-* 头
+        # 我们只需要直接返回 200 OK 即可，不要手动再 add header 了
         if request.method == 'OPTIONS':
-            response = make_response(jsonify({"status": "ok"}), 200)
-            response.headers.add('Access-Control-Allow-Origin', '*')
-            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
-            response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
-            return response
+            return jsonify({"status": "ok"}), 200
 
         # 正常的 API Key 检查
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
@@ -146,14 +138,13 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS']) # 显式允许 OPTIONS
+@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS']) 
 @require_api_key
 def analyze_fengshui():
     """
     核心分析接口
     """
-    # 如果是 OPTIONS 请求，require_api_key 已经处理并返回了，这里不需要做任何事
-    # 但为了安全起见，再次检查
+    # 如果是 OPTIONS 请求，require_api_key 已经处理并返回了
     if request.method == 'OPTIONS':
         return jsonify({"status": "ok"}), 200
 
