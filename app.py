@@ -5,7 +5,7 @@ from http import HTTPStatus
 from functools import wraps
 
 from flask import Flask, request, jsonify
-from flask_cors import CORS
+from flask_cors import CORS  # 只需要这个库
 from dotenv import load_dotenv
 import dashscope
 
@@ -29,15 +29,21 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- 增强的 CORS 配置 ---
-CORS(app, resources={r"/*": {"origins": "*"}})
-
-@app.after_request
-def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    return response
+# --- [修改重点 1] 正确的 CORS 配置 ---
+# 移除原本的 after_request，只保留这一段
+# 这里的 origins 列表里填入您的前端域名
+CORS(app, resources={
+    r"/*": {
+        "origins": [
+            "https://fengshuispaceplanner.com",  # 您的线上域名
+            "http://localhost:3000",             # 本地开发环境
+            "http://127.0.0.1:3000"
+        ],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization", "X-API-Key"]
+    }
+})
+# --- [修改结束] ---
 
 # --- 2. 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -47,11 +53,6 @@ else:
     dashscope.api_key = QWEN_API_KEY
 
 WP_API_KEY = os.getenv('WP_API_KEY')
-
-# --- [新增] 商品推广配置 ---
-# 你可以在这里修改你想推广的商品名称和链接
-PROMO_PRODUCT_NAME = "Tai Sui Protection Talisman"  # 商品名称 (太岁符/平安符)
-PROMO_PRODUCT_URL = "https://your-shop-domain.com/products/tai-sui-talisman" # 商品链接占位符
 
 # --- 3. 初始化知识库 ---
 kb_handler = None
@@ -66,17 +67,23 @@ if HAS_KB_HANDLER:
 
 # --- 4. 工具函数 ---
 
+# [修改重点 2] 简化的 API 密钥验证装饰器
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # flask_cors 会自动处理 OPTIONS 请求，这里不需要再写 if request.method == 'OPTIONS'...
+        
+        # 尝试从 Header 或 URL 参数获取 Key
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+        
+        # 验证 Key
         if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
-            if request.method == 'OPTIONS':
-                return jsonify({"status": "ok"}), 200
             return jsonify({"error": "Invalid or missing API key"}), 401
+            
         return f(*args, **kwargs)
     return decorated_function
 
+# 格式化数据函数 (保持不变)
 def format_grid_data_for_ai(grid_data):
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
@@ -91,9 +98,11 @@ def format_grid_data_for_ai(grid_data):
     }
     
     description = []
+    
     for pos_key, cell_data in grid_data.items():
         items = []
         area_types = []
+
         if isinstance(cell_data, dict):
             items = cell_data.get('items', [])
             area_types = cell_data.get('areaTypes', [])
@@ -104,6 +113,7 @@ def format_grid_data_for_ai(grid_data):
             continue
             
         pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
+        
         desc_parts = []
         if items:
             readable_items = [("Sleeping Bed" if i == 'bed' else i.capitalize()) for i in items]
@@ -117,6 +127,7 @@ def format_grid_data_for_ai(grid_data):
             
     if not description:
         return "The room is currently empty."
+        
     return "\n".join(description)
 
 # --- 5. 路由定义 ---
@@ -152,12 +163,12 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
+        user_info = data.get('userInfo', {}) 
         is_paid = data.get('isPaid', False)
 
         room_description = format_grid_data_for_ai(grid_data)
         logger.info(f"📝 Analyzing room (Paid: {is_paid})")
         
-        # 检索知识库
         search_query = "bedroom feng shui layout bed position"
         if "mirror" in room_description.lower():
             search_query += " mirror facing bed"
@@ -171,9 +182,7 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # --- Prompt 构建 (包含商品植入逻辑) ---
-        
-        depth_instruction = "Provide a highly detailed, professional analysis with specific actionable advice. Make the user feel the value of the report."
+        depth_instruction = "Provide a highly detailed, professional analysis." if is_paid else "Provide a concise but helpful analysis."
         
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
@@ -192,26 +201,18 @@ def analyze_fengshui():
         
         Output Format (Markdown):
         ## Positive Aspects
-        (List 2-3 good points found in the layout. Be detailed.)
+        (List 2-3 good points found in the layout)
         
         ## Areas for Improvement
-        (Identify clashes, e.g., mirrors facing bed. Be strict.)
+        (Identify clashes, e.g., mirrors facing bed, bed in death line. Be strict.)
         
         ## Recommended Changes
-        (Actionable advice. Give specific remedies like 'move bed to East'. 
-        
-        IMPORTANT MARKETING INSTRUCTION:
-        Regardless of the specific layout, you MUST recommend using a specific spiritual item to neutralize general negative energy and boost luck.
-        Specifically, recommend the '{PROMO_PRODUCT_NAME}'.
-        When mentioning it, you MUST use this exact Markdown link format: [{PROMO_PRODUCT_NAME}]({PROMO_PRODUCT_URL}).
-        Explain briefly why this specific talisman helps (e.g., balancing the magnetic field).
-        )
+        (Actionable advice. If paid user, give specific remedies like 'add a metal wu lou'.)
         
         ## Special Considerations
-        (Provide general advice on energy flow.)
+        (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
-        # 调用 AI
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
