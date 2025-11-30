@@ -4,7 +4,7 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
@@ -29,9 +29,17 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- [修改 1] 修复 CORS 配置 ---
-# 允许所有来源访问，不再需要手写的 after_request
-CORS(app, resources={r"/*": {"origins": "*"}})
+# --- [关键修复 1] 增强的 CORS 配置 ---
+# 允许所有来源，并明确允许 headers
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# --- [关键修复 2] 手动添加 Header 确保万无一失 ---
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # --- 2. 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -42,33 +50,37 @@ else:
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- [保留] 商品推广配置 ---
-# 这里保留了您的带货逻辑
-PROMO_PRODUCT_NAME = "Tai Sui Protection Talisman"  # 商品名称
-PROMO_PRODUCT_URL = "https://your-shop-domain.com/products/tai-sui-talisman" # 商品链接
+# --- 商品推广配置 (保留) ---
+PROMO_PRODUCT_NAME = "Tai Sui Protection Talisman"
+PROMO_PRODUCT_URL = "https://your-shop-domain.com/products/tai-sui-talisman"
 
 # --- 3. 初始化知识库 ---
 kb_handler = None
 if HAS_KB_HANDLER:
-    logger.info("🔄 正在初始化风水知识库...")
     try:
         kb_handler = KnowledgeBaseHandler(base_path="knowledge_base")
         kb_handler.load_knowledge_base()
-        logger.info("✅ 风水知识库准备就绪。")
     except Exception as e:
-        logger.warning(f"⚠️ 知识库初始化失败 (非致命错误): {e}")
+        logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
 # --- 4. 工具函数 ---
 
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # 获取 API Key
+        # --- [关键修复 3] 放行 OPTIONS 请求 ---
+        # 浏览器预检请求不带 Key，必须直接放行，否则会报 CORS 错误
+        if request.method == 'OPTIONS':
+            response = make_response(jsonify({"status": "ok"}), 200)
+            response.headers.add('Access-Control-Allow-Origin', '*')
+            response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+            response.headers.add('Access-Control-Allow-Methods', 'POST, OPTIONS')
+            return response
+
+        # 正常的 API Key 检查
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         
-        # 验证逻辑
         if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
-            # [修改 2] 删除了这里的 OPTIONS 判断，因为 flask-cors 会自动处理
             return jsonify({"error": "Invalid or missing API key"}), 401
             
         return f(*args, **kwargs)
@@ -123,10 +135,7 @@ def home():
     return jsonify({
         "status": "running",
         "service": "Feng Shui AI (Qwen Edition)",
-        "endpoints": {
-            "/analyze-fengshui": "POST - Main analysis",
-            "/health": "GET - Health check"
-        }
+        "cors_status": "enabled"
     })
 
 @app.route('/health', methods=['GET'])
@@ -137,12 +146,17 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-@app.route('/analyze-fengshui', methods=['POST'])
+@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS']) # 显式允许 OPTIONS
 @require_api_key
 def analyze_fengshui():
     """
     核心分析接口
     """
+    # 如果是 OPTIONS 请求，require_api_key 已经处理并返回了，这里不需要做任何事
+    # 但为了安全起见，再次检查
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     try:
         data = request.json
         if not data:
@@ -168,11 +182,9 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # --- Prompt 构建 (包含商品植入逻辑) ---
-        
+        # --- Prompt 构建 ---
         depth_instruction = "Provide a highly detailed, professional analysis with specific actionable advice. Make the user feel the value of the report."
         
-        # [保留] 这里完整保留了您的 Prompt 和商品植入指令
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
