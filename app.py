@@ -1,11 +1,11 @@
-import os  # ✅ 修改点1：添加了 os 模块
+import os
 import json
 import logging
 from http import HTTPStatus
 from functools import wraps
 
 from flask import Flask, request, jsonify, make_response
-from flask_cors import CORS  # 确保已安装: pip install flask-cors
+from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
 
@@ -19,6 +19,7 @@ except ImportError:
 
 load_dotenv()
 
+# 配置日志
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -27,13 +28,13 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- CORS 配置 (关键修改) ---
-# 让 flask_cors 自动处理所有 OPTIONS 请求
-# supports_credentials=True 如果你需要发送 cookie，否则可以设为 False
-# ✅ 修改点2：明确指定允许的域名，解决 CORS 报错
+# --- CORS 配置 (关键修改点 1) ---
+# ⚠️ 修改说明：将 origins 改为 "*"，允许所有域名访问。
+# 这能解决绝大多数 "Network Error" 或前端无反应的问题。
+# 等调试完全成功后，你可以再改回具体的域名列表。
 CORS(app, resources={
     r"/*": {
-        "origins": ["https://fengshuispaceplanner.com", "http://localhost:3000"], 
+        "origins": "*", 
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "Authorization"]
     }
@@ -48,7 +49,10 @@ else:
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-PRODUCT_URL = "https://your-shop-domain.com/products/feng-shui-protection-charm"
+# --- 产品推广配置 (关键修改点 2) ---
+# ⚠️ 修改说明：根据你提供的网站内容，更新了基础 URL。
+# 如果你有该产品的具体链接，请替换 /shop 为具体路径。
+PRODUCT_URL = "https://fengshuispaceplanner.com/shop"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
 # --- 初始化知识库 ---
@@ -115,6 +119,7 @@ def home():
     return jsonify({
         "status": "running",
         "service": "Feng Shui API (Qwen Edition)",
+        "domain": "fengshuispaceplanner.com",
         "endpoints": {
             "/analyze-fengshui": "POST - Main analysis",
             "/health": "GET - Health check"
@@ -129,16 +134,15 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 核心接口
-# 修改点 1: 移除 'OPTIONS'，只保留 'POST'。flask_cors 会自动处理 OPTIONS。
 @app.route('/analyze-fengshui', methods=['POST'])
 def analyze_fengshui():
-    # 修改点 2: 删除了所有手动处理 if request.method == 'OPTIONS' 的代码
-    
+    # 打印请求来源，方便调试 CORS 问题
+    request_origin = request.headers.get('Origin')
+    logger.info(f"📝 Received request from Origin: {request_origin}")
+
     # ✅ POST 请求 - 检查 API Key
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     
-    # 建议：如果 WP_API_KEY 未设置，最好不要拦截，方便测试
     if WP_API_KEY and api_key != WP_API_KEY:
         logger.warning(f"❌ Invalid API Key: {api_key}")
         return jsonify({"error": "Invalid or missing API key"}), 401
@@ -152,7 +156,7 @@ def analyze_fengshui():
         is_paid = data.get('isPaid', False)
 
         room_description = format_grid_data_for_ai(grid_data)
-        logger.info(f"📝 Analyzing room layout")
+        logger.info(f"📝 Analyzing room layout...")
         
         search_query = "bedroom feng shui layout bed position"
         if "mirror" in room_description.lower():
@@ -207,6 +211,7 @@ def analyze_fengshui():
         (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
+        # 调用 Qwen 模型
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -218,6 +223,7 @@ def analyze_fengshui():
 
         if response.status_code == HTTPStatus.OK:
             analysis_result = response.output.choices[0].message.content
+            logger.info("✅ Analysis generated successfully.")
             return jsonify({
                 "success": True,
                 "analysis": analysis_result,
