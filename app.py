@@ -32,11 +32,22 @@ app = Flask(__name__)
 # --- 增强的 CORS 配置 ---
 CORS(app, resources={r"/*": {"origins": "*"}})
 
+# ✅ 新增：处理 OPTIONS 预检请求
+@app.before_request
+def handle_preflight():
+    """处理 CORS 预检请求"""
+    if request.method == "OPTIONS":
+        response = app.make_default_options_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-API-Key'
+        response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
+        return response
+
 @app.after_request
 def after_request(response):
-    response.headers.add('Access-Control-Allow-Origin', '*')
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-API-Key'
+    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
     return response
 
 # --- 2. 配置 API Keys ---
@@ -65,14 +76,19 @@ if HAS_KB_HANDLER:
 
 # --- 4. 工具函数 ---
 
+# ✅ 修改：让 OPTIONS 请求直接通过
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
+        # OPTIONS 请求直接放行
+        if request.method == 'OPTIONS':
+            return '', 204
+        
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
-            if request.method == 'OPTIONS':
-                return jsonify({"status": "ok"}), 200
+        # 如果设置了 WP_API_KEY，则验证
+        if WP_API_KEY and api_key != WP_API_KEY:
             return jsonify({"error": "Invalid or missing API key"}), 401
+        # 如果没设置 WP_API_KEY，则不验证（开发模式）
         return f(*args, **kwargs)
     return decorated_function
 
@@ -143,7 +159,8 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-@app.route('/analyze-fengshui', methods=['POST'])
+# ✅ 添加 OPTIONS 到允许的方法
+@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 @require_api_key
 def analyze_fengshui():
     """
@@ -156,7 +173,6 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        # isPaid 仍然接收，但不再用于限制 AI 的输出质量
         is_paid = data.get('isPaid', False)
 
         # 2. 转换数据为文本描述
@@ -177,8 +193,7 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # 4. 构建 Prompt (移除限制，统一为高质量输出)
-        
+        # 4. 构建 Prompt
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
@@ -235,8 +250,6 @@ def analyze_fengshui():
             return jsonify({
                 "success": True,
                 "analysis": analysis_result,
-                # 依然返回 isPremium 状态给前端，前端可以用它来决定是否显示“解锁更多”按钮，
-                # 或者仅仅用来做 UI 区分，但内容本身已经是完整的了。
                 "isPremium": is_paid 
             })
         else:
