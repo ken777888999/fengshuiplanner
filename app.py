@@ -29,26 +29,15 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- 增强的 CORS 配置 ---
-CORS(app, resources={r"/*": {"origins": "*"}})
+# --- ✅ 唯一的 CORS 配置（删除所有其他 CORS 相关代码）---
+CORS(app, 
+     origins=["*"],
+     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+     supports_credentials=False)
 
-# ✅ 新增：处理 OPTIONS 预检请求
-@app.before_request
-def handle_preflight():
-    """处理 CORS 预检请求"""
-    if request.method == "OPTIONS":
-        response = app.make_default_options_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-API-Key'
-        response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
-        return response
-
-@app.after_request
-def after_request(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type,Authorization,X-API-Key'
-    response.headers['Access-Control-Allow-Methods'] = 'GET,PUT,POST,DELETE,OPTIONS'
-    return response
+# ❌ 删除 @app.before_request 的 handle_preflight 函数
+# ❌ 删除 @app.after_request 的 after_request 函数
 
 # --- 2. 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -76,14 +65,10 @@ if HAS_KB_HANDLER:
 
 # --- 4. 工具函数 ---
 
-# ✅ 修改：让 OPTIONS 请求直接通过
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # OPTIONS 请求直接放行
-        if request.method == 'OPTIONS':
-            return '', 204
-        
+        # ✅ flask_cors 会自动处理 OPTIONS，这里不需要特殊处理
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
         # 如果设置了 WP_API_KEY，则验证
         if WP_API_KEY and api_key != WP_API_KEY:
@@ -159,12 +144,12 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 添加 OPTIONS 到允许的方法
-@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
+# ✅ 只需要 POST，flask_cors 会自动处理 OPTIONS
+@app.route('/analyze-fengshui', methods=['POST'])
 @require_api_key
 def analyze_fengshui():
     """
-    核心分析接口 (移除付费限制，统一输出完整版 + 商品植入)
+    核心分析接口
     """
     try:
         # 1. 获取并验证数据
