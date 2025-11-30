@@ -1,160 +1,255 @@
 import os
+import json
 import logging
-from functools import wraps
 from http import HTTPStatus
+from functools import wraps
 
 from flask import Flask, request, jsonify
 from flask_cors import CORS
+from dotenv import load_dotenv
 import dashscope
 
-# --- 1. 初始化 Flask 应用 ---
-app = Flask(__name__)
+# 引入自定义模块
+try:
+    from knowledge_base_handler import KnowledgeBaseHandler
+    HAS_KB_HANDLER = True
+except ImportError:
+    HAS_KB_HANDLER = False
+    print("⚠️ Warning: knowledge_base_handler module not found. Running without local KB.")
 
-# ✅ [核心修复] 允许所有跨域请求。
-# Flask-CORS 会自动处理 OPTIONS 请求，千万不要自己写代码去拦截 OPTIONS！
-CORS(app, resources={r"/*": {"origins": "*"}})
+# 加载环境变量
+load_dotenv()
 
-# --- 2. 配置日志 ---
-logging.basicConfig(level=logging.INFO)
+# --- 1. 配置日志 ---
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger('app')
 
-# --- 3. 读取环境变量 ---
-QWEN_API_KEY = os.environ.get("QWEN_API_KEY")
-WP_API_KEY = os.environ.get("WP_API_KEY")
+app = Flask(__name__)
 
-# 配置 Dashscope (阿里云 Qwen)
-if QWEN_API_KEY:
-    dashscope.api_key = QWEN_API_KEY
-    logger.info("✅ Qwen API Key loaded.")
+# --- 增强的 CORS 配置 ---
+CORS(app, resources={r"/*": {"origins": "*"}})
+
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
+
+# --- 2. 配置 API Keys ---
+QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+if not QWEN_API_KEY:
+    logger.error("⚠️ 严重警告: 未检测到 QWEN_API_KEY，AI 功能将无法使用。")
 else:
-    logger.error("❌ Qwen API Key NOT found in environment variables!")
+    dashscope.api_key = QWEN_API_KEY
 
-# --- 4. 鉴权装饰器 ---
+WP_API_KEY = os.getenv('WP_API_KEY')
+
+# --- [商品配置] ---
+PRODUCT_URL = "https://your-shop-domain.com/products/feng-shui-protection-charm"
+PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
+
+# --- 3. 初始化知识库 ---
+kb_handler = None
+if HAS_KB_HANDLER:
+    logger.info("🔄 正在初始化风水知识库...")
+    try:
+        kb_handler = KnowledgeBaseHandler(base_path="knowledge_base")
+        kb_handler.load_knowledge_base()
+        logger.info("✅ 风水知识库准备就绪。")
+    except Exception as e:
+        logger.warning(f"⚠️ 知识库初始化失败 (非致命错误): {e}")
+
+# --- 4. 工具函数 ---
+
 def require_api_key(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        # 如果是 OPTIONS 请求（浏览器预检），直接放行，CORS 库会处理 Header
-        if request.method == 'OPTIONS':
-            return jsonify({"status": "ok"}), 200
-
-        # 获取前端传来的 Key
         api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        
-        # 验证 Key (如果环境变量里设置了 WP_API_KEY)
-        if WP_API_KEY and api_key != WP_API_KEY:
-            logger.warning(f"⛔ Invalid API Key attempt: {api_key}")
-            return jsonify({"error": "Invalid API key"}), 401
-            
+        if not api_key or (WP_API_KEY and api_key != WP_API_KEY):
+            if request.method == 'OPTIONS':
+                return jsonify({"status": "ok"}), 200
+            return jsonify({"error": "Invalid or missing API key"}), 401
         return f(*args, **kwargs)
     return decorated_function
 
-# --- 5. 辅助函数：格式化数据给 AI ---
-def format_grid_data(grid_data):
-    if not grid_data:
-        return "An empty bedroom."
+def format_grid_data_for_ai(grid_data):
+    position_map = {
+        "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
+        "2": "North (N) - Career Luck (Kan Trigram)",
+        "3": "Northeast (NE) - Knowledge Luck (Gen Trigram)",
+        "4": "West (W) - Children/Creativity Luck (Dui Trigram)",
+        "5": "Center (C) - Health/General Luck",
+        "6": "East (E) - Family/Health Luck (Zhen Trigram)",
+        "7": "Southwest (SW) - Love/Relationship Luck (Kun Trigram)",
+        "8": "South (S) - Fame/Recognition Luck (Li Trigram)",
+        "9": "Southeast (SE) - Wealth Luck (Xun Trigram)"
+    }
     
-    desc = []
-    for pos, data in grid_data.items():
-        items = data.get('items', [])
-        area = data.get('areaTypes', [])
-        
-        # 转换一下床的描述，更易读
-        readable_items = []
-        for item in items:
-            if "Bed" in item:
-                readable_items.append(item) # 保留床的方向描述
-            else:
-                readable_items.append(item.capitalize())
+    description = []
+    
+    for pos_key, cell_data in grid_data.items():
+        items = []
+        area_types = []
 
-        if readable_items or area:
-            item_str = ", ".join(readable_items) if readable_items else "empty space"
-            area_str = f"(Area Type: {', '.join(area)})" if area else ""
-            desc.append(f"- Position {pos}: {item_str} {area_str}")
+        if isinstance(cell_data, dict):
+            items = cell_data.get('items', [])
+            area_types = cell_data.get('areaTypes', [])
+        elif isinstance(cell_data, list):
+            items = cell_data
             
-    return "\n".join(desc)
+        if not items and not area_types:
+            continue
+            
+        pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
+        
+        desc_parts = []
+        if items:
+            readable_items = [("Sleeping Bed" if i == 'bed' else i.capitalize()) for i in items]
+            desc_parts.append(f"contains {', '.join(readable_items)}")
+        if area_types:
+            readable_types = [t.capitalize() for t in area_types]
+            desc_parts.append(f"is marked as {', '.join(readable_types)} area")
+            
+        if desc_parts:
+            description.append(f"- In the {pos_name}: {', and '.join(desc_parts)}.")
+            
+    if not description:
+        return "The room is currently empty."
+        
+    return "\n".join(description)
 
-# --- 6. 路由定义 ---
+# --- 5. 路由定义 ---
 
 @app.route('/')
 def home():
-    """健康检查接口"""
     return jsonify({
-        "status": "online", 
-        "message": "Feng Shui Server is running!",
-        "qwen_key_set": bool(QWEN_API_KEY)
+        "status": "running",
+        "service": "Feng Shui API (Qwen Edition)",
+        "endpoints": {
+            "/analyze-fengshui": "POST - Main analysis",
+            "/health": "GET - Health check"
+        }
+    })
+
+@app.route('/health', methods=['GET'])
+def health_check():
+    return jsonify({
+        "status": "ok",
+        "model": "qwen-plus",
+        "kb_loaded": kb_handler is not None
     })
 
 @app.route('/analyze-fengshui', methods=['POST'])
 @require_api_key
 def analyze_fengshui():
+    """
+    核心分析接口 (移除付费限制，统一输出完整版 + 商品植入)
+    """
     try:
+        # 1. 获取并验证数据
         data = request.json
         if not data:
-            return jsonify({"error": "No data received"}), 400
+            return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
+        # isPaid 仍然接收，但不再用于限制 AI 的输出质量
         is_paid = data.get('isPaid', False)
 
-        logger.info(f"🔮 Receiving analysis request. Paid: {is_paid}")
-
-        # 1. 准备 Prompt
-        room_desc = format_grid_data(grid_data)
+        # 2. 转换数据为文本描述
+        room_description = format_grid_data_for_ai(grid_data)
+        logger.info(f"📝 Analyzing room (Full Analysis Mode)")
         
-        # 根据付费状态调整 Prompt
-        role_desc = "You are a Grandmaster of Feng Shui."
-        if is_paid:
-            instruction = "Provide a DEEP, DETAILED analysis using Flying Star Feng Shui. Give specific remedies."
-        else:
-            instruction = "Provide a brief, general summary of the layout."
+        # 3. 获取知识库上下文
+        search_query = "bedroom feng shui layout bed position"
+        if "mirror" in room_description.lower():
+            search_query += " mirror facing bed"
+        if "door" in room_description.lower():
+            search_query += " bed facing door"
+        
+        book_context = ""
+        if kb_handler:
+            book_context = kb_handler.get_relevant_context(search_query)
+        
+        if not book_context:
+            book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
+        # 4. 构建 Prompt (移除限制，统一为高质量输出)
+        
         system_prompt = f"""
-        {role_desc}
+        You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
-        User's Bedroom Layout:
-        {room_desc}
+        === ANCIENT KNOWLEDGE BASE ===
+        {book_context}
+        ==============================
         
-        Task: {instruction}
+        Your Task:
+        Analyze the user's bedroom layout based on the description below.
+        
+        Layout Description:
+        {room_description}
+        
+        Instruction: Provide a highly detailed, professional, and empathetic analysis.
         
         Output Format (Markdown):
-        ## General Energy
-        ...
-        ## Specific Issues
-        ...
-        ## Remedies & Suggestions
-        ...
+        ## Positive Aspects
+        (List 2-3 good points found in the layout)
+        
+        ## Areas for Improvement
+        (Identify clashes, e.g., mirrors facing bed, bed in death line. Be strict but constructive.)
+        
+        ## Recommended Changes
+        (Provide specific, actionable remedies for every issue identified.)
+        
+        *** IMPORTANT MARKETING INSTRUCTION ***
+        In the "Recommended Changes" section, you MUST recommend the user to use a specific spiritual item to balance the energy.
+        Product Name: "{PRODUCT_NAME}"
+        Link URL: {PRODUCT_URL}
+        
+        Requirement: 
+        1. Contextualize this product naturally (e.g., "To suppress the negative Qi in this sector, I strongly recommend placing a...").
+        2. You MUST create a clickable link using Markdown format: [{PRODUCT_NAME}]({PRODUCT_URL}).
+        3. Do not make it look like an ad, but like a professional prescription.
+        ***************************************
+        
+        ## Special Considerations
+        (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
-        # 2. 调用 Qwen API
-        if not QWEN_API_KEY:
-            return jsonify({"success": False, "error": "Server configuration error: Missing AI Key"}), 500
-
+        # 5. 调用阿里云 Qwen API
         response = dashscope.Generation.call(
-            model='qwen-plus',
+            model='qwen-plus', 
             messages=[
-                {'role': 'system', 'content': 'You are a helpful Feng Shui assistant.'},
+                {'role': 'system', 'content': 'You are a helpful and traditional Feng Shui expert.'},
                 {'role': 'user', 'content': system_prompt}
             ],
             result_format='message'
         )
 
-        # 3. 处理响应
+        # 6. 处理响应
         if response.status_code == HTTPStatus.OK:
-            ai_text = response.output.choices[0].message.content
+            analysis_result = response.output.choices[0].message.content
             return jsonify({
                 "success": True,
-                "analysis": ai_text,
-                "isPremium": is_paid
+                "analysis": analysis_result,
+                # 依然返回 isPremium 状态给前端，前端可以用它来决定是否显示“解锁更多”按钮，
+                # 或者仅仅用来做 UI 区分，但内容本身已经是完整的了。
+                "isPremium": is_paid 
             })
         else:
-            error_msg = response.message
-            logger.error(f"❌ AI API Error: {error_msg}")
-            return jsonify({"success": False, "error": f"AI Service Error: {error_msg}"}), 500
+            logger.error(f"❌ Qwen API Error: {response.code} - {response.message}")
+            return jsonify({
+                "success": False, 
+                "error": f"AI Service Error: {response.message}"
+            }), 500
 
     except Exception as e:
-        logger.error(f"❌ Internal Server Error: {str(e)}")
-        return jsonify({"success": False, "error": str(e)}), 500
+        logger.error(f"❌ Server Error: {str(e)}")
+        return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
 if __name__ == '__main__':
-    # Render 要求监听 0.0.0.0
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
