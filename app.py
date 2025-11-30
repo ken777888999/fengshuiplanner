@@ -4,7 +4,7 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
@@ -27,7 +27,9 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- CORS 配置（最宽松） ---
+# --- CORS 配置 (关键修复) ---
+# 这里的配置会自动处理所有的 OPTIONS 请求
+# 我们显式允许 'X-API-Key'，这是前端发送的自定义 Header
 CORS(app, resources={
     r"/*": {
         "origins": "*",
@@ -126,20 +128,16 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 核心接口
-@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
+# ✅ 核心接口修复：
+# 1. 移除了 methods 中的 'OPTIONS' (Flask-CORS 会接管)
+# 2. 移除了函数内部手动处理 OPTIONS 的代码
+@app.route('/analyze-fengshui', methods=['POST'])
 def analyze_fengshui():
-    # ✅ OPTIONS 预检请求 - 直接返回，不检查 API Key
-    if request.method == 'OPTIONS':
-        response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
-        response.headers['Access-Control-Max-Age'] = '86400'
-        return response, 200
-    
-    # ✅ POST 请求 - 检查 API Key
+    # ✅ 验证 API Key
+    # 注意：Flask-CORS 已经处理了 OPTIONS 请求，能进到这里的都是 POST 请求
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+    
+    # 只有在环境变量设置了 Key 的情况下才验证，方便本地调试
     if WP_API_KEY and api_key != WP_API_KEY:
         logger.warning(f"❌ Invalid API Key: {api_key}")
         return jsonify({"error": "Invalid or missing API key"}), 401
