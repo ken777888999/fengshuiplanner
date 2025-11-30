@@ -4,7 +4,7 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
@@ -27,16 +27,14 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- CORS 配置 ---
-CORS(app)
-
-# ✅ 确保所有响应都有 CORS 头
-@app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
-    return response
+# --- CORS 配置（最宽松） ---
+CORS(app, resources={
+    r"/*": {
+        "origins": "*",
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "X-API-Key", "Authorization"]
+    }
+})
 
 # --- 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -128,17 +126,22 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 核心接口：手动处理 OPTIONS
+# ✅ 核心接口
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # ✅ 处理 OPTIONS 预检请求
+    # ✅ OPTIONS 预检请求 - 直接返回，不检查 API Key
     if request.method == 'OPTIONS':
-        response = jsonify({'status': 'ok'})
+        response = make_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key'
+        response.headers['Access-Control-Max-Age'] = '86400'
         return response, 200
     
-    # ✅ API Key 验证（只对 POST 请求）
+    # ✅ POST 请求 - 检查 API Key
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     if WP_API_KEY and api_key != WP_API_KEY:
+        logger.warning(f"❌ Invalid API Key: {api_key}")
         return jsonify({"error": "Invalid or missing API key"}), 401
     
     try:
@@ -150,7 +153,7 @@ def analyze_fengshui():
         is_paid = data.get('isPaid', False)
 
         room_description = format_grid_data_for_ai(grid_data)
-        logger.info(f"📝 Analyzing room")
+        logger.info(f"📝 Analyzing room layout")
         
         search_query = "bedroom feng shui layout bed position"
         if "mirror" in room_description.lower():
