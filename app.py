@@ -4,8 +4,8 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
+# 1. 移除了 flask_cors 引用，防止冲突
 from flask import Flask, request, jsonify, make_response
-from flask_cors import CORS
 from dotenv import load_dotenv
 import dashscope
 
@@ -28,25 +28,28 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- CORS 配置 (第一层防护) ---
-CORS(app, resources={r"/*": {"origins": "*"}})
+# --- ❌ 已删除: CORS(app) ---
+# 原因：它会和下面的 after_request 冲突，导致 "Double CORS Headers" 错误。
 
-# --- 强制 CORS 注入 (第二层防护 - 核心修复) ---
-# 采用动态 Origin 策略，比 '*' 更安全且兼容性更好
+# --- ✅ 唯一 CORS 控制中心 ---
 @app.after_request
 def after_request(response):
+    # 获取请求来源
     origin = request.headers.get('Origin')
     
-    # 允许的域名白名单（可选，目前逻辑是允许所有 Origin 但明确返回 Origin 值）
+    # 动态设置 Origin
     if origin:
-        response.headers.add('Access-Control-Allow-Origin', origin)
+        response.headers['Access-Control-Allow-Origin'] = origin
     else:
-        response.headers.add('Access-Control-Allow-Origin', '*')
+        response.headers['Access-Control-Allow-Origin'] = '*'
         
-    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
-    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
-    # 关键：允许凭证，解决部分浏览器拦截问题
-    response.headers.add('Access-Control-Allow-Credentials', 'true')
+    # 允许的 Headers 和 Methods
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
+    
+    # 关键：允许携带 Cookie/认证信息
+    response.headers['Access-Control-Allow-Credentials'] = 'true'
+    
     return response
 
 # --- 配置 API Keys ---
@@ -59,7 +62,6 @@ else:
 WP_API_KEY = os.getenv('WP_API_KEY')
 
 # --- 产品推广配置 ---
-# 注意：商店页面目前显示 "Coming Soon"，请确保此链接是您期望用户访问的
 PRODUCT_URL = "https://fengshuispaceplanner.com/shop/"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
@@ -127,11 +129,7 @@ def home():
     return jsonify({
         "status": "running",
         "service": "Feng Shui API (Qwen Edition)",
-        "domain": "fengshuispaceplanner.com",
-        "endpoints": {
-            "/analyze-fengshui": "POST - Main analysis",
-            "/health": "GET - Health check"
-        }
+        "domain": "fengshuispaceplanner.com"
     })
 
 @app.route('/health', methods=['GET'])
@@ -145,14 +143,14 @@ def health_check():
 # ✅ 核心接口
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # ✅ 显式处理 OPTIONS 请求 (预检)
+    # ✅ 1. 优先处理 OPTIONS 预检请求
     if request.method == 'OPTIONS':
         logger.info("Received OPTIONS request")
-        response = make_response()
-        # headers 会由 after_request 自动添加
-        return response
+        # 直接返回空响应，状态码 200
+        # headers 会由 after_request 自动补全，不要在这里手动加
+        return make_response('', 200)
 
-    # ✅ POST 请求处理
+    # ✅ 2. 处理 POST 请求
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
@@ -225,6 +223,8 @@ def analyze_fengshui():
         (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
+        # ⚠️ 警告：qwen-plus 速度较慢，容易导致前端超时 (net::ERR_FAILED)
+        # 如果部署后仍然报错，请尝试临时改为 'qwen-turbo' 测试
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
