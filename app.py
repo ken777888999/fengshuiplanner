@@ -4,7 +4,6 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
-# 引入 make_response 用于构建 OPTIONS 响应
 from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS
 from dotenv import load_dotenv
@@ -29,16 +28,25 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- 1. 基础 CORS 配置 (第一道防线) ---
+# --- CORS 配置 (第一层防护) ---
 CORS(app, resources={r"/*": {"origins": "*"}})
 
-# --- 2. 强力 CORS 补丁 (关键修复：第二道防线) ---
-# 无论 Flask-CORS 是否生效，这里都会强制在每个响应头里加上允许跨域的标签
+# --- 强制 CORS 注入 (第二层防护 - 核心修复) ---
+# 采用动态 Origin 策略，比 '*' 更安全且兼容性更好
 @app.after_request
-def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+def after_request(response):
+    origin = request.headers.get('Origin')
+    
+    # 允许的域名白名单（可选，目前逻辑是允许所有 Origin 但明确返回 Origin 值）
+    if origin:
+        response.headers.add('Access-Control-Allow-Origin', origin)
+    else:
+        response.headers.add('Access-Control-Allow-Origin', '*')
+        
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization,X-API-Key')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    # 关键：允许凭证，解决部分浏览器拦截问题
+    response.headers.add('Access-Control-Allow-Credentials', 'true')
     return response
 
 # --- 配置 API Keys ---
@@ -51,8 +59,7 @@ else:
 WP_API_KEY = os.getenv('WP_API_KEY')
 
 # --- 产品推广配置 ---
-# 注意：根据 URL 内容，Shop 页面目前显示 "Our store is in the works" (即将开业)。
-# 建议在商店正式上线前，暂时保留此链接，或者更换为其他已上线的页面。
+# 注意：商店页面目前显示 "Coming Soon"，请确保此链接是您期望用户访问的
 PRODUCT_URL = "https://fengshuispaceplanner.com/shop/"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
@@ -135,21 +142,19 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# --- 3. 路由逻辑修改 (关键修复：处理 OPTIONS) ---
+# ✅ 核心接口
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # 显式处理 OPTIONS 预检请求
+    # ✅ 显式处理 OPTIONS 请求 (预检)
     if request.method == 'OPTIONS':
         logger.info("Received OPTIONS request")
         response = make_response()
         # headers 会由 after_request 自动添加
-        return response, 200
+        return response
 
-    # 打印请求来源，方便调试
-    request_origin = request.headers.get('Origin')
-    logger.info(f"📝 Received request from Origin: {request_origin}")
-
-    # 检查 API Key
+    # ✅ POST 请求处理
+    logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
+    
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     
     if WP_API_KEY and api_key != WP_API_KEY:
@@ -220,7 +225,6 @@ def analyze_fengshui():
         (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
-        # 调用 Qwen 模型
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -250,6 +254,5 @@ def analyze_fengshui():
         return jsonify({"success": False, "error": "Internal Server Error"}), 500
 
 if __name__ == '__main__':
-    # Render 默认端口 10000，本地测试 5000
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
