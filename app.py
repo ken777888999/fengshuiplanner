@@ -1,4 +1,4 @@
-import os
+import os  # ✅ 修改点1：添加了 os 模块
 import json
 import logging
 from http import HTTPStatus
@@ -30,9 +30,10 @@ app = Flask(__name__)
 # --- CORS 配置 (关键修改) ---
 # 让 flask_cors 自动处理所有 OPTIONS 请求
 # supports_credentials=True 如果你需要发送 cookie，否则可以设为 False
+# ✅ 修改点2：明确指定允许的域名，解决 CORS 报错
 CORS(app, resources={
     r"/*": {
-        "origins": "*",  # 允许所有域名，生产环境建议换成 ["https://fengshuispaceplanner.com"]
+        "origins": ["https://fengshuispaceplanner.com", "http://localhost:3000"], 
         "methods": ["GET", "POST", "OPTIONS"],
         "allow_headers": ["Content-Type", "X-API-Key", "Authorization"]
     }
