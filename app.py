@@ -15,12 +15,10 @@ try:
     HAS_KB_HANDLER = True
 except ImportError:
     HAS_KB_HANDLER = False
-    print("⚠️ Warning: knowledge_base_handler module not found. Running without local KB.")
+    print("⚠️ Warning: knowledge_base_handler module not found.")
 
-# 加载环境变量
 load_dotenv()
 
-# --- 1. 配置日志 ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -29,30 +27,30 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- ✅ 唯一的 CORS 配置（删除所有其他 CORS 相关代码）---
-CORS(app, 
-     origins=["*"],
-     methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-     allow_headers=["Content-Type", "Authorization", "X-API-Key"],
-     supports_credentials=False)
+# --- CORS 配置 ---
+CORS(app)
 
-# ❌ 删除 @app.before_request 的 handle_preflight 函数
-# ❌ 删除 @app.after_request 的 after_request 函数
+# ✅ 确保所有响应都有 CORS 头
+@app.after_request
+def add_cors_headers(response):
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+    return response
 
-# --- 2. 配置 API Keys ---
+# --- 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ 严重警告: 未检测到 QWEN_API_KEY，AI 功能将无法使用。")
+    logger.error("⚠️ 未检测到 QWEN_API_KEY")
 else:
     dashscope.api_key = QWEN_API_KEY
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- [商品配置] ---
 PRODUCT_URL = "https://your-shop-domain.com/products/feng-shui-protection-charm"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
-# --- 3. 初始化知识库 ---
+# --- 初始化知识库 ---
 kb_handler = None
 if HAS_KB_HANDLER:
     logger.info("🔄 正在初始化风水知识库...")
@@ -61,22 +59,9 @@ if HAS_KB_HANDLER:
         kb_handler.load_knowledge_base()
         logger.info("✅ 风水知识库准备就绪。")
     except Exception as e:
-        logger.warning(f"⚠️ 知识库初始化失败 (非致命错误): {e}")
+        logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
-# --- 4. 工具函数 ---
-
-def require_api_key(f):
-    @wraps(f)
-    def decorated_function(*args, **kwargs):
-        # ✅ flask_cors 会自动处理 OPTIONS，这里不需要特殊处理
-        api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-        # 如果设置了 WP_API_KEY，则验证
-        if WP_API_KEY and api_key != WP_API_KEY:
-            return jsonify({"error": "Invalid or missing API key"}), 401
-        # 如果没设置 WP_API_KEY，则不验证（开发模式）
-        return f(*args, **kwargs)
-    return decorated_function
-
+# --- 工具函数 ---
 def format_grid_data_for_ai(grid_data):
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
@@ -123,8 +108,7 @@ def format_grid_data_for_ai(grid_data):
         
     return "\n".join(description)
 
-# --- 5. 路由定义 ---
-
+# --- 路由定义 ---
 @app.route('/')
 def home():
     return jsonify({
@@ -144,15 +128,20 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 只需要 POST，flask_cors 会自动处理 OPTIONS
-@app.route('/analyze-fengshui', methods=['POST'])
-@require_api_key
+# ✅ 核心接口：手动处理 OPTIONS
+@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    """
-    核心分析接口
-    """
+    # ✅ 处理 OPTIONS 预检请求
+    if request.method == 'OPTIONS':
+        response = jsonify({'status': 'ok'})
+        return response, 200
+    
+    # ✅ API Key 验证（只对 POST 请求）
+    api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
+    if WP_API_KEY and api_key != WP_API_KEY:
+        return jsonify({"error": "Invalid or missing API key"}), 401
+    
     try:
-        # 1. 获取并验证数据
         data = request.json
         if not data:
             return jsonify({"error": "No JSON data provided"}), 400
@@ -160,11 +149,9 @@ def analyze_fengshui():
         grid_data = data.get('gridData', {})
         is_paid = data.get('isPaid', False)
 
-        # 2. 转换数据为文本描述
         room_description = format_grid_data_for_ai(grid_data)
-        logger.info(f"📝 Analyzing room (Full Analysis Mode)")
+        logger.info(f"📝 Analyzing room")
         
-        # 3. 获取知识库上下文
         search_query = "bedroom feng shui layout bed position"
         if "mirror" in room_description.lower():
             search_query += " mirror facing bed"
@@ -178,7 +165,6 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # 4. 构建 Prompt
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
@@ -210,7 +196,7 @@ def analyze_fengshui():
         Link URL: {PRODUCT_URL}
         
         Requirement: 
-        1. Contextualize this product naturally (e.g., "To suppress the negative Qi in this sector, I strongly recommend placing a...").
+        1. Contextualize this product naturally.
         2. You MUST create a clickable link using Markdown format: [{PRODUCT_NAME}]({PRODUCT_URL}).
         3. Do not make it look like an ad, but like a professional prescription.
         ***************************************
@@ -219,7 +205,6 @@ def analyze_fengshui():
         (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
-        # 5. 调用阿里云 Qwen API
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -229,7 +214,6 @@ def analyze_fengshui():
             result_format='message'
         )
 
-        # 6. 处理响应
         if response.status_code == HTTPStatus.OK:
             analysis_result = response.output.choices[0].message.content
             return jsonify({
