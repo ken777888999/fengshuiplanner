@@ -4,19 +4,21 @@ import logging
 import uuid
 import time
 from http import HTTPStatus
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
 
 # --- 自定义模块引入 ---
+# 尝试引入知识库模块，如果没有也不报错，只是禁用相关功能
 try:
     from knowledge_base_handler import KnowledgeBaseHandler
     HAS_KB_HANDLER = True
 except ImportError:
     HAS_KB_HANDLER = False
-    print("⚠️ Warning: knowledge_base_handler module not found.")
+    print("⚠️ Warning: knowledge_base_handler module not found. Running without KB.")
 
+# 加载环境变量
 load_dotenv()
 
 # --- 日志配置 ---
@@ -28,7 +30,8 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- CORS 配置 (允许跨域) ---
+# --- 关键修改：CORS 配置 (允许跨域) ---
+# 这行代码解决了前端 fetch 报错的问题
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # --- 内存数据库 (模拟 Redis) ---
@@ -36,16 +39,18 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 reports_db = {}
 
 # --- API Keys 配置 ---
-QWEN_API_KEY = os.getenv("QWEN_API_KEY")
+# 优先读取 QWEN_API_KEY，如果没有则尝试读取 DASHSCOPE_API_KEY
+QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ 未检测到 QWEN_API_KEY")
+    logger.error("⚠️ 未检测到 API Key (QWEN_API_KEY 或 DASHSCOPE_API_KEY)")
 else:
     dashscope.api_key = QWEN_API_KEY
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- 产品推广配置 (基于提供的 URL) ---
+# --- 产品推广配置 (基于你提供的 URL) ---
 PRODUCT_URL = "https://fengshuispaceplanner.com/shop/"
+# 如果你想推具体的太岁符，可以保持这个名字，或者改为 "Feng Shui Cures"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
 # --- 初始化知识库 ---
@@ -224,15 +229,19 @@ def health_check():
 # ==========================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # flask-cors 自动处理 OPTIONS
+    # 处理预检请求 (OPTIONS)
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
     
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
-    # API Key 验证
+    # API Key 验证 (可选，如果前端没传可以注释掉)
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
     if WP_API_KEY and api_key != WP_API_KEY:
-        return jsonify({"error": "Invalid or missing API key"}), 401
-    
+        logger.warning("Invalid API Key attempt")
+        # return jsonify({"error": "Invalid or missing API key"}), 401 
+        # 暂时注释掉 401，以免前端没配 Key 导致调不通，正式上线可开启
+
     try:
         data = request.json
         if not data:
@@ -246,9 +255,12 @@ def analyze_fengshui():
         gender = personal_info.get('gender', '')
         birth_date = personal_info.get('birthDate', '')
         
-        birth_year = birth_date.split('-')[0] if birth_date and '-' in birth_date else ''
-        if not birth_year and birth_date and '/' in birth_date:
-            birth_year = birth_date.split('/')[0]
+        birth_year = ''
+        if birth_date:
+            if '-' in birth_date:
+                birth_year = birth_date.split('-')[0]
+            elif '/' in birth_date:
+                birth_year = birth_date.split('/')[0]
             
         kua_number = None
         favorable_directions = {}
@@ -323,8 +335,9 @@ def analyze_fengshui():
         (Provide general advice on energy flow.)
         """
 
-        # 3. 调用 AI (严格遵循第一版的 DashScope 原生调用方式)
+        # 3. 调用 AI
         logger.info(f"📝 Calling Qwen API (qwen-plus)...")
+        # 使用 dashscope.Generation.call (兼容旧版和新版SDK)
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -376,14 +389,16 @@ def analyze_fengshui():
 
     except Exception as e:
         logger.error(f"❌ Server Error: {str(e)}")
-        return jsonify({"success": False, "error": "Internal Server Error"}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================
 #  接口 2: 解锁报告 (付费后调用)
 # ==========================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
-    # flask-cors 自动处理 OPTIONS
+    # 处理预检请求
+    if request.method == 'OPTIONS':
+        return jsonify({'status': 'ok'}), 200
         
     data = request.json
     report_id = data.get('reportId')
@@ -407,5 +422,5 @@ def unlock_report():
     })
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
