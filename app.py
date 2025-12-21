@@ -123,6 +123,79 @@ def format_grid_data_for_ai(grid_data):
         
     return "\n".join(description)
 
+# --- 计算Kua数字的工具函数 ---
+def calculate_kua_number(gender, birth_year):
+    if not gender or not birth_year:
+        return None
+        
+    try:
+        year = int(birth_year)
+        last_digit = sum(int(digit) for digit in str(year)) % 9 or 9
+        
+        if gender.lower() == 'male':
+            kua = (11 - last_digit) % 9 or 9
+        else:  # female
+            kua = (last_digit + 4) % 9 or 9
+            
+        return kua
+    except:
+        return None
+
+# --- 获取有利方位的工具函数 ---
+def get_favorable_directions(kua_number):
+    if not kua_number:
+        return {}
+        
+    # 东四命：1, 3, 4, 9
+    east_group = [1, 3, 4, 9]
+    # 西四命：2, 5, 6, 7, 8
+    west_group = [2, 5, 6, 7, 8]
+    
+    kua_directions = {
+        1: {
+            "favorable": ["Southeast", "East", "South", "North"],
+            "unfavorable": ["Northwest", "West", "Southwest", "Northeast"]
+        },
+        2: {
+            "favorable": ["Northeast", "West", "Northwest", "Southwest"],
+            "unfavorable": ["Southeast", "East", "South", "North"]
+        },
+        3: {
+            "favorable": ["South", "North", "East", "Southeast"],
+            "unfavorable": ["Southwest", "Northeast", "Northwest", "West"]
+        },
+        4: {
+            "favorable": ["North", "South", "Southeast", "East"],
+            "unfavorable": ["Southwest", "Northeast", "West", "Northwest"]
+        },
+        5: {  # 特殊情况，算作西四命
+            "favorable": ["Northeast", "West", "Northwest", "Southwest"],
+            "unfavorable": ["Southeast", "East", "South", "North"]
+        },
+        6: {
+            "favorable": ["West", "Northeast", "Southwest", "Northwest"],
+            "unfavorable": ["East", "Southeast", "North", "South"]
+        },
+        7: {
+            "favorable": ["Northwest", "Southwest", "West", "Northeast"],
+            "unfavorable": ["Southeast", "East", "South", "North"]
+        },
+        8: {
+            "favorable": ["Southwest", "Northwest", "Northeast", "West"],
+            "unfavorable": ["Southeast", "East", "South", "North"]
+        },
+        9: {
+            "favorable": ["East", "South", "North", "Southeast"],
+            "unfavorable": ["West", "Southwest", "Northwest", "Northeast"]
+        }
+    }
+    
+    result = kua_directions.get(kua_number, {})
+    result["kua_number"] = kua_number
+    result["group"] = "East Group" if kua_number in east_group else "West Group"
+    
+    return result
+
 # --- 路由定义 ---
 @app.route('/')
 def home():
@@ -166,6 +239,24 @@ def analyze_fengshui():
 
         grid_data = data.get('gridData', {})
         is_paid = data.get('isPaid', False)
+        
+        # 获取个人信息
+        personal_info = data.get('personalInfo', {})
+        gender = personal_info.get('gender', '')
+        birth_date = personal_info.get('birthDate', '')
+        
+        # 提取出生年份并计算Kua数字
+        birth_year = birth_date.split('-')[0] if birth_date and '-' in birth_date else ''
+        if not birth_year and birth_date and '/' in birth_date:
+            birth_year = birth_date.split('/')[0]
+            
+        kua_number = None
+        favorable_directions = {}
+        
+        if gender and birth_year:
+            kua_number = calculate_kua_number(gender, birth_year)
+            favorable_directions = get_favorable_directions(kua_number)
+            logger.info(f"📊 计算出Kua数字: {kua_number}, 群组: {favorable_directions.get('group', '未知')}")
 
         room_description = format_grid_data_for_ai(grid_data)
         logger.info(f"📝 Analyzing room layout with Qwen...")
@@ -183,12 +274,26 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
+        # 添加Kua信息到提示中
+        kua_info = ""
+        if kua_number and favorable_directions:
+            kua_info = f"""
+            === PERSONAL KUA INFORMATION ===
+            Kua Number: {kua_number}
+            Group: {favorable_directions.get('group', 'Unknown')}
+            Favorable Directions: {', '.join(favorable_directions.get('favorable', []))}
+            Unfavorable Directions: {', '.join(favorable_directions.get('unfavorable', []))}
+            ================================
+            """
+
         system_prompt = f"""
         You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
         
         === ANCIENT KNOWLEDGE BASE ===
         {book_context}
         ==============================
+        
+        {kua_info}
         
         Your Task:
         Analyze the user's bedroom layout based on the description below.
@@ -240,7 +345,9 @@ def analyze_fengshui():
             return jsonify({
                 "success": True,
                 "analysis": analysis_result,
-                "isPremium": is_paid 
+                "isPremium": is_paid,
+                "kua": kua_number,
+                "favorableDirections": favorable_directions
             })
         else:
             logger.error(f"❌ Qwen API Error: {response.code} - {response.message}")
