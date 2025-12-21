@@ -8,6 +8,8 @@ from functools import wraps
 
 # Flask imports
 from flask import Flask, request, jsonify, make_response
+# 【修改点1】引入 CORS 库
+from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
 
@@ -30,22 +32,21 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
+# 【修改点2】启用全局 CORS，允许所有域名访问
+# 这行代码自动处理 OPTIONS 请求，解决 net::ERR_FAILED
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
 # --- In-Memory Database (Simulated Redis) ---
 # Stores full reports: { "uuid": { "content": "...", "created_at": timestamp } }
 reports_db = {}
 
-# --- CORS Control Center ---
+# --- CORS Control Center (双重保险) ---
+# 虽然上面用了 CORS 库，保留这个作为强制补充，确保万无一失
 @app.after_request
 def after_request(response):
-    origin = request.headers.get('Origin')
-    if origin:
-        response.headers['Access-Control-Allow-Origin'] = origin
-    else:
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        
+    response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
     return response
 
 # --- API Keys Configuration ---
@@ -235,9 +236,8 @@ def health_check():
 # ==========================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    if request.method == 'OPTIONS':
-        return make_response('', 200)
-
+    # 【修改点3】删除了手动的 OPTIONS 检查，flask-cors 会自动处理
+    
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
     # API Key Check
@@ -251,7 +251,7 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        is_paid = data.get('isPaid', False) # Frontend can send this if user is already logged in/paid
+        is_paid = data.get('isPaid', False) 
         
         # Personal Info & Kua Calculation
         personal_info = data.get('personalInfo', {})
@@ -391,8 +391,7 @@ def analyze_fengshui():
 # ==========================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
-    if request.method == 'OPTIONS':
-        return make_response('', 200)
+    # 【修改点4】同样删除了手动的 OPTIONS 检查
         
     data = request.json
     report_id = data.get('reportId')
@@ -417,5 +416,6 @@ def unlock_report():
     })
 
 if __name__ == '__main__':
+    # Render 部署需要监听 0.0.0.0
     port = int(os.environ.get('PORT', 5000))
     app.run(host='0.0.0.0', port=port)
