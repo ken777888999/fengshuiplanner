@@ -1,16 +1,17 @@
 import os
 import json
 import logging
-import re  # 引入正则模块用于处理文本
+import uuid
+import time
 from http import HTTPStatus
 from functools import wraps
 
-# 1. 移除了 flask_cors 引用，防止冲突
+# Flask imports
 from flask import Flask, request, jsonify, make_response
 from dotenv import load_dotenv
 import dashscope
 
-# 引入自定义模块
+# Custom modules
 try:
     from knowledge_base_handler import KnowledgeBaseHandler
     HAS_KB_HANDLER = True
@@ -20,7 +21,7 @@ except ImportError:
 
 load_dotenv()
 
-# 配置日志
+# --- Logging Configuration ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
@@ -29,52 +30,114 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- ✅ 唯一 CORS 控制中心 ---
+# --- In-Memory Database (Simulated Redis) ---
+# Stores full reports: { "uuid": { "content": "...", "created_at": timestamp } }
+reports_db = {}
+
+# --- CORS Control Center ---
 @app.after_request
 def after_request(response):
-    # 获取请求来源
     origin = request.headers.get('Origin')
-    
-    # 动态设置 Origin
     if origin:
         response.headers['Access-Control-Allow-Origin'] = origin
     else:
         response.headers['Access-Control-Allow-Origin'] = '*'
         
-    # 允许的 Headers 和 Methods
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    
-    # 关键：允许携带 Cookie/认证信息
     response.headers['Access-Control-Allow-Credentials'] = 'true'
-    
     return response
 
-# --- 配置 API Keys ---
+# --- API Keys Configuration ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ 未检测到 QWEN_API_KEY")
+    logger.error("⚠️ QWEN_API_KEY not found in environment variables")
 else:
     dashscope.api_key = QWEN_API_KEY
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- 产品推广配置 ---
+# --- Product Promotion Configuration ---
 PRODUCT_URL = "https://fengshuispaceplanner.com/shop/"
 PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
 
-# --- 初始化知识库 ---
+# --- Initialize Knowledge Base ---
 kb_handler = None
 if HAS_KB_HANDLER:
-    logger.info("🔄 正在初始化风水知识库...")
+    logger.info("🔄 Initializing Feng Shui Knowledge Base...")
     try:
         kb_handler = KnowledgeBaseHandler(base_path="knowledge_base")
         kb_handler.load_knowledge_base()
-        logger.info("✅ 风水知识库准备就绪。")
+        logger.info("✅ Knowledge Base Ready.")
     except Exception as e:
-        logger.warning(f"⚠️ 知识库初始化失败: {e}")
+        logger.warning(f"⚠️ Knowledge Base Init Failed: {e}")
 
-# --- 工具函数 ---
+# ==========================================
+#  CORE LOGIC: Truncation / Paywall Filter
+# ==========================================
+def filter_report_for_free_tier(full_text):
+    """
+    Security Logic:
+    1. Keep 'Positive Aspects' completely.
+    2. Keep ONLY the 1st bullet point of 'Areas for Improvement'.
+    3. DELETE everything else (Recommended Changes, Special Considerations).
+    """
+    lines = full_text.split('\n')
+    output_lines = []
+    
+    found_improvement_section = False
+    bullet_count = 0
+    
+    # Headers must match the System Prompt exactly
+    IMPROVEMENT_HEADER = "## Areas for Improvement"
+    
+    for line in lines:
+        stripped_line = line.strip()
+
+        # 1. Check if we hit the "Areas for Improvement" section
+        if IMPROVEMENT_HEADER in line:
+            found_improvement_section = True
+            output_lines.append(line)
+            continue
+            
+        # 2. Before that section, keep everything (Intro, Positive Aspects)
+        if not found_improvement_section:
+            output_lines.append(line)
+            continue
+            
+        # 3. Inside "Areas for Improvement"
+        if found_improvement_section:
+            # Check for list items (-, *, 1.)
+            is_list_item = stripped_line.startswith(('-', '*', '1.'))
+            
+            if is_list_item:
+                bullet_count += 1
+                if bullet_count == 1:
+                    # Keep only the first issue
+                    output_lines.append(line)
+                else:
+                    # STOP processing immediately after the first issue
+                    break
+            else:
+                # Keep text that isn't a bullet point (e.g., intro sentence to the section)
+                if bullet_count < 2:
+                    output_lines.append(line)
+
+    # 4. Append the Paywall Message
+    truncated_content = "\n".join(output_lines)
+    
+    paywall_message = (
+        "\n\n"
+        "> 🔒 **PREMIUM CONTENT HIDDEN**\n"
+        ">\n"
+        "> Only the first issue is visible. \n"
+        "> **Unlock the full report** to see the remaining issues, \n"
+        "> detailed **Recommended Changes**, and the **Cure Selection**."
+    )
+    
+    return truncated_content + paywall_message
+
+# --- Helper Functions ---
 def format_grid_data_for_ai(grid_data):
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
@@ -89,11 +152,9 @@ def format_grid_data_for_ai(grid_data):
     }
     
     description = []
-    
     for pos_key, cell_data in grid_data.items():
         items = []
         area_types = []
-
         if isinstance(cell_data, dict):
             items = cell_data.get('items', [])
             area_types = cell_data.get('areaTypes', [])
@@ -104,7 +165,6 @@ def format_grid_data_for_ai(grid_data):
             continue
             
         pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
-        
         desc_parts = []
         if items:
             readable_items = [("Sleeping Bed" if i == 'bed' else i.capitalize()) for i in items]
@@ -116,24 +176,18 @@ def format_grid_data_for_ai(grid_data):
         if desc_parts:
             description.append(f"- In the {pos_name}: {', and '.join(desc_parts)}.")
             
-    if not description:
-        return "The room is currently empty."
-        
-    return "\n".join(description)
+    return "\n".join(description) if description else "The room is currently empty."
 
 def calculate_kua_number(gender, birth_year):
     if not gender or not birth_year:
         return None
-        
     try:
         year = int(birth_year)
         last_digit = sum(int(digit) for digit in str(year)) % 9 or 9
-        
         if gender.lower() == 'male':
             kua = (11 - last_digit) % 9 or 9
-        else:  # female
+        else:
             kua = (last_digit + 4) % 9 or 9
-            
         return kua
     except:
         return None
@@ -141,10 +195,7 @@ def calculate_kua_number(gender, birth_year):
 def get_favorable_directions(kua_number):
     if not kua_number:
         return {}
-        
     east_group = [1, 3, 4, 9]
-    west_group = [2, 5, 6, 7, 8]
-    
     kua_directions = {
         1: {"favorable": ["Southeast", "East", "South", "North"], "unfavorable": ["Northwest", "West", "Southwest", "Northeast"]},
         2: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"]},
@@ -156,72 +207,13 @@ def get_favorable_directions(kua_number):
         8: {"favorable": ["Southwest", "Northwest", "Northeast", "West"], "unfavorable": ["Southeast", "East", "South", "North"]},
         9: {"favorable": ["East", "South", "North", "Southeast"], "unfavorable": ["West", "Southwest", "Northwest", "Northeast"]}
     }
-    
     result = kua_directions.get(kua_number, {})
     result["kua_number"] = kua_number
     result["group"] = "East Group" if kua_number in east_group else "West Group"
-    
     return result
 
-# --- ✅ 新增：免费版内容过滤函数 ---
-def filter_report_for_free_tier(full_text):
-    """
-    针对免费用户截断报告：
-    1. 保留 'Positive Aspects' 全部内容。
-    2. 保留 'Areas for Improvement' 的第一条。
-    3. 删除后续所有内容。
-    """
-    lines = full_text.split('\n')
-    filtered_lines = []
-    
-    current_section = None
-    improvement_bullet_count = 0
-    
-    for line in lines:
-        stripped = line.strip()
-        
-        # 检测章节标题 (Markdown ## 或 ###)
-        if stripped.startswith('##'):
-            section_name = stripped.replace('#', '').strip().lower()
-            
-            # 如果遇到了 "Recommended Changes" 或 "Special Considerations"，直接结束处理
-            if "recommended" in section_name or "special" in section_name:
-                break
-                
-            current_section = section_name
-            filtered_lines.append(line)
-            continue
-            
-        # 根据当前章节处理内容
-        if current_section:
-            if "positive" in current_section:
-                # 正面因素：全部保留
-                filtered_lines.append(line)
-                
-            elif "improvement" in current_section:
-                # 待改进区域：只保留第一条
-                
-                # 如果是空行或子标题，保留
-                if not stripped or stripped.startswith('###'):
-                    filtered_lines.append(line)
-                # 如果是列表项 (- 或 *)
-                elif stripped.startswith('-') or stripped.startswith('*'):
-                    if improvement_bullet_count == 0:
-                        filtered_lines.append(line)
-                        improvement_bullet_count += 1
-                        # 添加一个提示性的省略号
-                        filtered_lines.append("\n... [Content Hidden in Free Version] ...")
-                    else:
-                        # 找到第二条了，停止该章节，或者直接结束整个循环
-                        # 这里我们选择直接结束，因为后面的都不给看了
-                        break
-                elif improvement_bullet_count == 0:
-                    # 第一条之前的介绍性文字，保留
-                    filtered_lines.append(line)
-    
-    return "\n".join(filtered_lines)
+# --- Routes ---
 
-# --- 路由定义 ---
 @app.route('/')
 def home():
     return jsonify({
@@ -238,19 +230,19 @@ def health_check():
         "kb_loaded": kb_handler is not None
     })
 
-# ✅ 核心接口
+# ==========================================
+#  ENDPOINT 1: Analyze (Generates & Truncates)
+# ==========================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
     if request.method == 'OPTIONS':
-        logger.info("Received OPTIONS request")
         return make_response('', 200)
 
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
+    # API Key Check
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-    
     if WP_API_KEY and api_key != WP_API_KEY:
-        logger.warning(f"❌ Invalid API Key: {api_key}")
         return jsonify({"error": "Invalid or missing API key"}), 401
     
     try:
@@ -259,8 +251,9 @@ def analyze_fengshui():
             return jsonify({"error": "No JSON data provided"}), 400
 
         grid_data = data.get('gridData', {})
-        is_paid = data.get('isPaid', False)  # 获取付费状态
+        is_paid = data.get('isPaid', False) # Frontend can send this if user is already logged in/paid
         
+        # Personal Info & Kua Calculation
         personal_info = data.get('personalInfo', {})
         gender = personal_info.get('gender', '')
         birth_date = personal_info.get('birthDate', '')
@@ -277,20 +270,13 @@ def analyze_fengshui():
             favorable_directions = get_favorable_directions(kua_number)
 
         room_description = format_grid_data_for_ai(grid_data)
-        logger.info(f"📝 Analyzing room layout with Qwen...")
         
+        # Prepare Prompt
         search_query = "bedroom feng shui layout bed position"
-        if "mirror" in room_description.lower():
-            search_query += " mirror facing bed"
-        if "door" in room_description.lower():
-            search_query += " bed facing door"
+        if "mirror" in room_description.lower(): search_query += " mirror facing bed"
+        if "door" in room_description.lower(): search_query += " bed facing door"
         
-        book_context = ""
-        if kb_handler:
-            book_context = kb_handler.get_relevant_context(search_query)
-        
-        if not book_context:
-            book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
+        book_context = kb_handler.get_relevant_context(search_query) if kb_handler else "General Feng Shui principles apply."
 
         kua_info = ""
         if kua_number and favorable_directions:
@@ -325,7 +311,7 @@ def analyze_fengshui():
         (List 2-3 good points found in the layout)
         
         ## Areas for Improvement
-        (Identify clashes, e.g., mirrors facing bed, bed in death line. Be strict but constructive.)
+        (Identify critical clashes. Be strict but constructive.)
         
         ## Recommended Changes
         (Provide specific, actionable remedies for every issue identified.)
@@ -338,13 +324,14 @@ def analyze_fengshui():
         Requirement: 
         1. Contextualize this product naturally.
         2. You MUST create a clickable link using Markdown format: [{PRODUCT_NAME}]({PRODUCT_URL}).
-        3. Do not make it look like an ad, but like a professional prescription.
         ***************************************
         
         ## Special Considerations
-        (Provide general advice on energy flow and room balance based on the layout provided.)
+        (Provide general advice on energy flow.)
         """
 
+        # Call AI
+        logger.info(f"📝 Calling Qwen API...")
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -357,19 +344,34 @@ def analyze_fengshui():
         if response.status_code == HTTPStatus.OK:
             full_analysis = response.output.choices[0].message.content
             
-            # ✅ 核心修改：根据付费状态处理内容
-            final_analysis = full_analysis
+            # 1. Generate Report ID
+            report_id = str(uuid.uuid4())
+            
+            # 2. Save FULL report to memory
+            reports_db[report_id] = {
+                "full_content": full_analysis,
+                "created_at": time.time(),
+                "kua": kua_number,
+                "favorableDirections": favorable_directions
+            }
+            
+            # 3. Determine what to send back
+            final_content = full_analysis
+            is_locked = False
+            
             if not is_paid:
-                logger.info("🔒 User is on Free Tier. Truncating report.")
-                final_analysis = filter_report_for_free_tier(full_analysis)
+                # Apply the Truncation Logic
+                final_content = filter_report_for_free_tier(full_analysis)
+                is_locked = True
+                logger.info(f"✂️ Returning TRUNCATED report for ID: {report_id}")
             else:
-                logger.info("🔓 User is Premium. Sending full report.")
+                logger.info(f"🔓 Returning FULL report for ID: {report_id}")
 
-            logger.info("✅ Analysis generated successfully.")
             return jsonify({
                 "success": True,
-                "analysis": final_analysis, # 返回处理后的文本
-                "isPremium": is_paid,
+                "reportId": report_id,
+                "analysis": final_content,
+                "isLocked": is_locked,
                 "kua": kua_number,
                 "favorableDirections": favorable_directions
             })
@@ -383,6 +385,36 @@ def analyze_fengshui():
     except Exception as e:
         logger.error(f"❌ Server Error: {str(e)}")
         return jsonify({"success": False, "error": "Internal Server Error"}), 500
+
+# ==========================================
+#  ENDPOINT 2: Unlock Report (Post-Payment)
+# ==========================================
+@app.route('/unlock-report', methods=['POST', 'OPTIONS'])
+def unlock_report():
+    if request.method == 'OPTIONS':
+        return make_response('', 200)
+        
+    data = request.json
+    report_id = data.get('reportId')
+    
+    # In a real app, you would verify a payment token here
+    # payment_token = data.get('paymentToken')
+    
+    if not report_id or report_id not in reports_db:
+        return jsonify({"success": False, "error": "Report not found"}), 404
+        
+    logger.info(f"🔓 Unlocking report: {report_id}")
+    
+    report_data = reports_db[report_id]
+    
+    return jsonify({
+        "success": True,
+        "reportId": report_id,
+        "analysis": report_data['full_content'], # Return the full text
+        "isLocked": False,
+        "kua": report_data.get('kua'),
+        "favorableDirections": report_data.get('favorableDirections')
+    })
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
