@@ -4,8 +4,9 @@ import logging
 from http import HTTPStatus
 from functools import wraps
 
-# 1. 移除了 flask_cors 引用，防止冲突
+# ✅ 1. 引入 flask_cors
 from flask import Flask, request, jsonify, make_response
+from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
 
@@ -28,29 +29,9 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- ❌ 已删除: CORS(app) ---
-# 原因：它会和下面的 after_request 冲突，导致 "Double CORS Headers" 错误。
-
-# --- ✅ 唯一 CORS 控制中心 ---
-@app.after_request
-def after_request(response):
-    # 获取请求来源
-    origin = request.headers.get('Origin')
-    
-    # 动态设置 Origin
-    if origin:
-        response.headers['Access-Control-Allow-Origin'] = origin
-    else:
-        response.headers['Access-Control-Allow-Origin'] = '*'
-        
-    # 允许的 Headers 和 Methods
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, Authorization, X-API-Key'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS, PUT, DELETE'
-    
-    # 关键：允许携带 Cookie/认证信息
-    response.headers['Access-Control-Allow-Credentials'] = 'true'
-    
-    return response
+# --- ✅ 2. 使用标准库配置 CORS (替代原有的 after_request) ---
+# 这行代码允许所有域名访问，并自动处理 OPTIONS 预检请求
+CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
 # --- 配置 API Keys ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY")
@@ -76,7 +57,7 @@ if HAS_KB_HANDLER:
     except Exception as e:
         logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
-# --- 工具函数 ---
+# --- 工具函数 (保持不变) ---
 def format_grid_data_for_ai(grid_data):
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
@@ -123,77 +104,38 @@ def format_grid_data_for_ai(grid_data):
         
     return "\n".join(description)
 
-# --- 计算Kua数字的工具函数 ---
 def calculate_kua_number(gender, birth_year):
     if not gender or not birth_year:
         return None
-        
     try:
         year = int(birth_year)
         last_digit = sum(int(digit) for digit in str(year)) % 9 or 9
-        
         if gender.lower() == 'male':
             kua = (11 - last_digit) % 9 or 9
-        else:  # female
+        else:
             kua = (last_digit + 4) % 9 or 9
-            
         return kua
     except:
         return None
 
-# --- 获取有利方位的工具函数 ---
 def get_favorable_directions(kua_number):
     if not kua_number:
         return {}
-        
-    # 东四命：1, 3, 4, 9
     east_group = [1, 3, 4, 9]
-    # 西四命：2, 5, 6, 7, 8
-    west_group = [2, 5, 6, 7, 8]
-    
     kua_directions = {
-        1: {
-            "favorable": ["Southeast", "East", "South", "North"],
-            "unfavorable": ["Northwest", "West", "Southwest", "Northeast"]
-        },
-        2: {
-            "favorable": ["Northeast", "West", "Northwest", "Southwest"],
-            "unfavorable": ["Southeast", "East", "South", "North"]
-        },
-        3: {
-            "favorable": ["South", "North", "East", "Southeast"],
-            "unfavorable": ["Southwest", "Northeast", "Northwest", "West"]
-        },
-        4: {
-            "favorable": ["North", "South", "Southeast", "East"],
-            "unfavorable": ["Southwest", "Northeast", "West", "Northwest"]
-        },
-        5: {  # 特殊情况，算作西四命
-            "favorable": ["Northeast", "West", "Northwest", "Southwest"],
-            "unfavorable": ["Southeast", "East", "South", "North"]
-        },
-        6: {
-            "favorable": ["West", "Northeast", "Southwest", "Northwest"],
-            "unfavorable": ["East", "Southeast", "North", "South"]
-        },
-        7: {
-            "favorable": ["Northwest", "Southwest", "West", "Northeast"],
-            "unfavorable": ["Southeast", "East", "South", "North"]
-        },
-        8: {
-            "favorable": ["Southwest", "Northwest", "Northeast", "West"],
-            "unfavorable": ["Southeast", "East", "South", "North"]
-        },
-        9: {
-            "favorable": ["East", "South", "North", "Southeast"],
-            "unfavorable": ["West", "Southwest", "Northwest", "Northeast"]
-        }
+        1: {"favorable": ["Southeast", "East", "South", "North"], "unfavorable": ["Northwest", "West", "Southwest", "Northeast"]},
+        2: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"]},
+        3: {"favorable": ["South", "North", "East", "Southeast"], "unfavorable": ["Southwest", "Northeast", "Northwest", "West"]},
+        4: {"favorable": ["North", "South", "Southeast", "East"], "unfavorable": ["Southwest", "Northeast", "West", "Northwest"]},
+        5: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"]},
+        6: {"favorable": ["West", "Northeast", "Southwest", "Northwest"], "unfavorable": ["East", "Southeast", "North", "South"]},
+        7: {"favorable": ["Northwest", "Southwest", "West", "Northeast"], "unfavorable": ["Southeast", "East", "South", "North"]},
+        8: {"favorable": ["Southwest", "Northwest", "Northeast", "West"], "unfavorable": ["Southeast", "East", "South", "North"]},
+        9: {"favorable": ["East", "South", "North", "Southeast"], "unfavorable": ["West", "Southwest", "Northwest", "Northeast"]}
     }
-    
     result = kua_directions.get(kua_number, {})
     result["kua_number"] = kua_number
     result["group"] = "East Group" if kua_number in east_group else "West Group"
-    
     return result
 
 # --- 路由定义 ---
@@ -209,21 +151,15 @@ def home():
 def health_check():
     return jsonify({
         "status": "ok",
-        "model": "qwen-plus",
+        "model": "qwen-turbo", # 更新状态显示
         "kb_loaded": kb_handler is not None
     })
 
 # ✅ 核心接口
-@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
+@app.route('/analyze-fengshui', methods=['POST']) # 不需要手动写 OPTIONS
 def analyze_fengshui():
-    # ✅ 1. 优先处理 OPTIONS 预检请求
-    if request.method == 'OPTIONS':
-        logger.info("Received OPTIONS request")
-        # 直接返回空响应，状态码 200
-        # headers 会由 after_request 自动补全，不要在这里手动加
-        return make_response('', 200)
-
-    # ✅ 2. 处理 POST 请求
+    # ✅ 3. 移除手动的 OPTIONS 检查，CORS 库会自动处理
+    
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
     api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
@@ -240,12 +176,10 @@ def analyze_fengshui():
         grid_data = data.get('gridData', {})
         is_paid = data.get('isPaid', False)
         
-        # 获取个人信息
         personal_info = data.get('personalInfo', {})
         gender = personal_info.get('gender', '')
         birth_date = personal_info.get('birthDate', '')
         
-        # 提取出生年份并计算Kua数字
         birth_year = birth_date.split('-')[0] if birth_date and '-' in birth_date else ''
         if not birth_year and birth_date and '/' in birth_date:
             birth_year = birth_date.split('/')[0]
@@ -256,7 +190,7 @@ def analyze_fengshui():
         if gender and birth_year:
             kua_number = calculate_kua_number(gender, birth_year)
             favorable_directions = get_favorable_directions(kua_number)
-            logger.info(f"📊 计算出Kua数字: {kua_number}, 群组: {favorable_directions.get('group', '未知')}")
+            logger.info(f"📊 计算出Kua数字: {kua_number}")
 
         room_description = format_grid_data_for_ai(grid_data)
         logger.info(f"📝 Analyzing room layout with Qwen...")
@@ -274,7 +208,6 @@ def analyze_fengshui():
         if not book_context:
             book_context = "General Feng Shui principles apply. Avoid mirrors facing beds."
 
-        # 添加Kua信息到提示中
         kua_info = ""
         if kua_number and favorable_directions:
             kua_info = f"""
@@ -328,10 +261,9 @@ def analyze_fengshui():
         (Provide general advice on energy flow and room balance based on the layout provided.)
         """
 
-        # ⚠️ 警告：qwen-plus 速度较慢，容易导致前端超时 (net::ERR_FAILED)
-        # 如果部署后仍然报错，请尝试临时改为 'qwen-turbo' 测试
+        # ✅ 4. 切换为 qwen-turbo 以提高速度，减少超时错误
         response = dashscope.Generation.call(
-            model='qwen-plus', 
+            model='qwen-turbo', 
             messages=[
                 {'role': 'system', 'content': 'You are a helpful and traditional Feng Shui expert.'},
                 {'role': 'user', 'content': system_prompt}
