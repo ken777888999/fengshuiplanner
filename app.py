@@ -48,10 +48,9 @@ else:
 
 WP_API_KEY = os.getenv('WP_API_KEY')
 
-# --- 产品推广配置 (基于你提供的 URL) ---
-PRODUCT_URL = "https://fengshuispaceplanner.com/shop/"
-# 如果你想推具体的太岁符，可以保持这个名字，或者改为 "Feng Shui Cures"
-PRODUCT_NAME = "太岁化煞符 (Tai Sui Protection Amulet)"
+# --- 产品推广配置 ---
+PRODUCT_URL = "https://fengshuispaceplanner.com/product/personalized-feng-shui-talisman/"
+PRODUCT_NAME = "Personalized Feng Shui Talisman"
 
 # --- 初始化知识库 ---
 kb_handler = None
@@ -329,6 +328,9 @@ def analyze_fengshui():
         1. Contextualize this product naturally.
         2. You MUST create a clickable link using Markdown format: [{PRODUCT_NAME}]({PRODUCT_URL}).
         3. Do not make it look like an ad, but like a professional prescription.
+        4. ALWAYS provide SPECIFIC PLACEMENT INSTRUCTIONS for the talisman (e.g., "Northeast corner", "Under your bed", "On the Southwest wall") based on the user's unique bedroom layout and identified feng shui issues.
+        5. Emphasize that each talisman is personalized to address the specific energy imbalances found in their analysis, making it more effective than generic solutions.
+
         ***************************************
         
         ## Special Considerations
