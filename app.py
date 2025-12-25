@@ -99,7 +99,7 @@ def filter_report_for_free_tier(full_text):
         # 3. 进入 "Areas for Improvement" 区域后的处理
         if found_improvement_section:
             # 检查是否为列表项 (-, *, 1.)
-            is_list_item = stripped_line.startswith(('-', '*', '1.'))
+            is_list_item = ( stripped_line.startswith(('-', '*')) or (stripped_line and stripped_line[0].isdigit() and stripped_line[1:].startswith('.')) )
             
             if is_list_item:
                 bullet_count += 1
