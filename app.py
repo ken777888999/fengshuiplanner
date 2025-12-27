@@ -1,3 +1,4 @@
+import requests
 import os
 import json
 import logging
@@ -37,6 +38,11 @@ CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 # --- 内存数据库 (模拟 Redis) ---
 # 用于存储完整报告，格式: { "uuid": { "content": "...", "created_at": timestamp, ... } }
 reports_db = {}
+
+# --- WooCommerce 配置 ---
+WOO_CK = os.getenv("WOO_CK") or "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56"
+WOO_CS = os.getenv("WOO_CS") or "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612"
+WOO_URL = "https://fengshuispaceplanner.com" 
 
 # --- API Keys 配置 ---
 # 优先读取 QWEN_API_KEY，如果没有则尝试读取 DASHSCOPE_API_KEY
@@ -394,7 +400,7 @@ def analyze_fengshui():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================
-#  接口 2: 解锁报告 (付费后调用)
+#  接口 2: 验证订单号并解锁报告 (修改版)
 # ==========================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
@@ -404,25 +410,58 @@ def unlock_report():
         
     data = request.json
     report_id = data.get('reportId')
+    order_id = data.get('orderId') # 新增：获取用户输入的订单号
     
-    # 在真实应用中，这里应该验证 paymentToken
-    
+    # 1. 基础检查
     if not report_id or report_id not in reports_db:
-        return jsonify({"success": False, "error": "Report not found"}), 404
-        
-    logger.info(f"🔓 Unlocking report: {report_id}")
+        return jsonify({"success": False, "error": "Report session expired. Please click Analyze again."}), 404
     
-    report_data = reports_db[report_id]
-    
-    return jsonify({
-        "success": True,
-        "reportId": report_id,
-        "analysis": report_data['full_content'], # 返回完整内容
-        "isLocked": False,
-        "kua": report_data.get('kua'),
-        "favorableDirections": report_data.get('favorableDirections')
-    })
+    if not order_id:
+        return jsonify({"success": False, "error": "Please enter your Order ID."}), 400
 
-if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 10000))
-    app.run(host='0.0.0.0', port=port)
+    # 2. 去 WooCommerce 查单 (核心逻辑)
+    logger.info(f"🔍 Verifying Order ID: {order_id} for Report: {report_id}")
+    
+    try:
+        # 构造 WooCommerce API URL
+        # 注意：WooCommerce 订单号通常是数字
+        wc_api_url = f"{WOO_URL}/wp-json/wc/v3/orders/{order_id}"
+        
+        response = requests.get(
+            wc_api_url, 
+            auth=(WOO_CK, WOO_CS),
+            timeout=10
+        )
+        
+        if response.status_code != 200:
+            logger.warning(f"❌ Order check failed: {response.status_code}")
+            return jsonify({"success": False, "error": "Invalid Order ID or Order not found."}), 404
+            
+        order_data = response.json()
+        order_status = order_data.get('status')
+        
+        # 3. 验证订单状态
+        # 允许的状态: completed (完成), processing (处理中 - 用户付完款通常是这个状态)
+        valid_statuses = ['completed', 'processing']
+        
+        if order_status in valid_statuses:
+            logger.info(f"✅ Order {order_id} is valid ({order_status}). Unlocking...")
+            
+            report_data = reports_db[report_id]
+            return jsonify({
+                "success": True,
+                "reportId": report_id,
+                "analysis": report_data['full_content'], # 返回完整内容
+                "isLocked": False,
+                "kua": report_data.get('kua'),
+                "favorableDirections": report_data.get('favorableDirections')
+            })
+        else:
+            return jsonify({
+                "success": False, 
+                "error": f"Order status is '{order_status}'. Payment not confirmed yet."
+            }), 400
+
+    except Exception as e:
+        logger.error(f"❌ WooCommerce API Error: {str(e)}")
+        return jsonify({"success": False, "error": "Verification failed. Please try again."}), 500
