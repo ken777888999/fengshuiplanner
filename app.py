@@ -5,10 +5,11 @@ import logging
 import uuid
 import time
 from http import HTTPStatus
-from flask import Flask, request, jsonify, make_response
+from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
+from functools import wraps
 
 # --- 自定义模块引入 ---
 try:
@@ -27,12 +28,22 @@ logging.basicConfig(
 logger = logging.getLogger('fengshui_app')
 
 app = Flask(__name__)
-CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
+
+# ============================================================
+# ✅ 修复1: 更严格的 CORS 配置
+# ============================================================
+CORS(app, 
+     resources={r"/*": {"origins": "*"}},
+     methods=["GET", "POST", "OPTIONS"],
+     allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+     supports_credentials=False,  # 改为 False，避免冲突
+     max_age=3600
+)
 
 reports_db = {}
 
 WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
-WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
+WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a8183f79dd3c8ba76612")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
@@ -55,16 +66,46 @@ if HAS_KB_HANDLER:
         logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
 
+# ============================================================
+# ✅ 修复2: 手动添加 CORS 头的装饰器
+# ============================================================
 def add_cors_headers(response):
+    """确保所有响应都有 CORS 头"""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    return response
+
+
+def cors_preflight():
+    """处理 OPTIONS 预检请求"""
+    response = make_response()
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
     response.headers['Access-Control-Max-Age'] = '3600'
     return response
 
+
 @app.after_request
 def after_request(response):
     return add_cors_headers(response)
+
+
+# ============================================================
+# ✅ 修复3: 显式处理所有 OPTIONS 请求
+# ============================================================
+@app.before_request
+def handle_options():
+    if request.method == 'OPTIONS':
+        response = make_response()
+        response.headers['Access-Control-Allow-Origin'] = '*'
+        response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+        response.headers['Access-Control-Max-Age'] = '3600'
+        return response
 
 
 def cleanup_old_reports():
@@ -206,7 +247,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.0.0", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.0.1", "cached": len(reports_db)})
 
 
 @app.route('/health')
@@ -216,16 +257,14 @@ def health():
 
 @app.route('/wake', methods=['GET', 'POST', 'OPTIONS'])
 def wake():
-    if request.method == 'OPTIONS':
-        return make_response()
     return jsonify({"status": "awake", "time": time.time()})
 
 
+# ============================================================
+# ✅ 修复4: 优化 analyze-fengshui，使用更短的 prompt
+# ============================================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    if request.method == 'OPTIONS':
-        return make_response()
-    
     cleanup_old_reports()
     
     try:
@@ -250,68 +289,52 @@ def analyze_fengshui():
         
         room_desc = format_grid_data_for_ai(grid_data)
         
-        # 知识库上下文
+        # 知识库上下文 - 简化
         kb_context = ""
         if kb_handler:
             query = "bedroom feng shui bed position"
-            if "mirror" in room_desc.lower(): query += " mirror"
-            if "door" in room_desc.lower(): query += " door"
             kb_context = kb_handler.get_relevant_context(query)
-        kb_context = kb_context or "Apply classical Feng Shui: Chi flow, Yin-Yang balance, Five Elements harmony."
+        kb_context = kb_context[:500] if kb_context else "Classical Feng Shui principles apply."
         
-        # 命卦信息
-        kua_block = ""
+        # 命卦信息 - 简化
+        kua_info = ""
         if kua and dirs:
-            kua_block = f"""
-=== PERSONAL KUA ===
-Kua: {kua} ({dirs.get('group')} Group)
-Best (Sheng Qi): {dirs.get('best')}
-Favorable: {', '.join(dirs.get('favorable', []))}
-Worst (Jue Ming): {dirs.get('worst')}
-====================
-"""
+            kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        prompt = f"""You are a Master Feng Shui Consultant (30+ years, Flying Star & Eight Mansions methods).
+        # ✅ 更短的 prompt 以加快响应
+        prompt = f"""Feng Shui Master analysis for bedroom layout.
 
-=== KNOWLEDGE BASE ===
-{kb_context}
-======================
-{kua_block}
-=== CURRENT LAYOUT ===
-{room_desc if room_desc != "The room is currently empty." else "Empty room. Provide general guidance."}
-======================
+Layout: {room_desc}
+{f'Personal: {kua_info}' if kua_info else ''}
 
-OUTPUT (Markdown):
-
+Provide in Markdown:
 ## Overall Energy Assessment
-(2-3 sentences)
+(2 sentences)
 
-## Positive Aspects
-(2-3 good points)
+## Positive Aspects  
+(2-3 points)
 
 ## Areas for Improvement
-(3-5 issues with WHY)
+(3-4 issues with impact)
 
 ## Recommended Changes
-(Specific fixes for each issue)
+(fixes for each issue)
+Include: [{PRODUCT_NAME}]({PRODUCT_URL}) for {dirs.get('best', 'favorable')} corner.
 
-*** MUST RECOMMEND: [{PRODUCT_NAME}]({PRODUCT_URL}) ***
-- Place in {dirs.get('best', 'favorable')} corner
-- Explain how it fixes the energy imbalance
-- Mention personalization
-
-## Special Considerations
-(Kua-based tips: sleep direction, colors, elements)
-"""
+## Special Tips
+(1-2 personalized tips)"""
         
         logger.info("📝 Calling Qwen API...")
+        
+        # ✅ 添加超时控制
         resp = dashscope.Generation.call(
             model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': 'You are a wise, traditional Feng Shui master. Professional yet warm.'},
+                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses.'},
                 {'role': 'user', 'content': prompt}
             ],
-            result_format='message'
+            result_format='message',
+            timeout=25  # 25秒超时
         )
         
         if resp.status_code == HTTPStatus.OK:
@@ -328,6 +351,8 @@ OUTPUT (Markdown):
             
             content = full if is_paid else filter_report_for_free_tier(full)
             
+            logger.info(f"✅ Report generated: {report_id[:8]}...")
+            
             return jsonify({
                 "success": True,
                 "reportId": report_id,
@@ -337,6 +362,7 @@ OUTPUT (Markdown):
                 "favorableDirections": dirs
             })
         else:
+            logger.error(f"❌ Qwen API error: {resp.message}")
             return jsonify({"success": False, "error": resp.message}), 500
             
     except Exception as e:
@@ -346,9 +372,6 @@ OUTPUT (Markdown):
 
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
-    if request.method == 'OPTIONS':
-        return make_response()
-    
     data = request.json or {}
     report_id = data.get('reportId')
     order_id = data.get('orderId')
@@ -388,9 +411,6 @@ def unlock_report():
 
 @app.route('/get-report/<report_id>', methods=['GET', 'OPTIONS'])
 def get_report(report_id):
-    if request.method == 'OPTIONS':
-        return make_response()
-    
     if report_id not in reports_db:
         return jsonify({"success": False, "error": "Not found."}), 404
     
@@ -407,7 +427,32 @@ def get_report(report_id):
     })
 
 
+# ============================================================
+# ✅ 修复5: 添加错误处理器确保 CORS 头
+# ============================================================
+@app.errorhandler(Exception)
+def handle_exception(e):
+    logger.error(f"Unhandled exception: {e}", exc_info=True)
+    response = jsonify({"success": False, "error": "Internal server error"})
+    response.status_code = 500
+    return add_cors_headers(response)
+
+
+@app.errorhandler(404)
+def handle_404(e):
+    response = jsonify({"success": False, "error": "Not found"})
+    response.status_code = 404
+    return add_cors_headers(response)
+
+
+@app.errorhandler(500)
+def handle_500(e):
+    response = jsonify({"success": False, "error": "Server error"})
+    response.status_code = 500
+    return add_cors_headers(response)
+
+
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🚀 Starting on port {port}")
-    app.run(host='0.0.0.0', port=port, debug=False)
+    app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
