@@ -5,13 +5,12 @@ import logging
 import uuid
 import time
 from http import HTTPStatus
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, make_response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
 
 # --- 自定义模块引入 ---
-# 尝试引入知识库模块，如果没有也不报错，只是禁用相关功能
 try:
     from knowledge_base_handler import KnowledgeBaseHandler
     HAS_KB_HANDLER = True
@@ -31,12 +30,10 @@ logger = logging.getLogger('app')
 
 app = Flask(__name__)
 
-# --- 关键修改：CORS 配置 (允许跨域) ---
-# 这行代码解决了前端 fetch 报错的问题
+# --- CORS 配置 ---
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# --- 内存数据库 (模拟 Redis) ---
-# 用于存储完整报告，格式: { "uuid": { "content": "...", "created_at": timestamp, ... } }
+# --- 内存数据库 ---
 reports_db = {}
 
 # --- WooCommerce 配置 ---
@@ -45,7 +42,6 @@ WOO_CS = os.getenv("WOO_CS") or "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612"
 WOO_URL = "https://fengshuispaceplanner.com" 
 
 # --- API Keys 配置 ---
-# 优先读取 QWEN_API_KEY，如果没有则尝试读取 DASHSCOPE_API_KEY
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
     logger.error("⚠️ 未检测到 API Key (QWEN_API_KEY 或 DASHSCOPE_API_KEY)")
@@ -70,6 +66,22 @@ if HAS_KB_HANDLER:
         logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
 # ==========================================
+#  ✅ 关键修复：添加 CORS 头的辅助函数
+# ==========================================
+def add_cors_headers(response):
+    """为响应添加 CORS 头"""
+    response.headers['Access-Control-Allow-Origin'] = '*'
+    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+    response.headers['Access-Control-Max-Age'] = '3600'
+    return response
+
+# ✅ 关键修复：在每个请求后自动添加 CORS 头
+@app.after_request
+def after_request(response):
+    return add_cors_headers(response)
+
+# ==========================================
 #  核心逻辑: 内容截断 / 付费墙过滤器
 # ==========================================
 def filter_report_for_free_tier(full_text):
@@ -85,42 +97,33 @@ def filter_report_for_free_tier(full_text):
     found_improvement_section = False
     bullet_count = 0
     
-    # 必须与 System Prompt 中的标题完全一致
     IMPROVEMENT_HEADER = "## Areas for Improvement"
     
     for line in lines:
         stripped_line = line.strip()
 
-        # 1. 检查是否到达 "Areas for Improvement" 区域
         if IMPROVEMENT_HEADER in line:
             found_improvement_section = True
             output_lines.append(line)
             continue
             
-        # 2. 在该区域之前的内容全部保留 (简介, Positive Aspects)
         if not found_improvement_section:
             output_lines.append(line)
             continue
             
-        # 3. 进入 "Areas for Improvement" 区域后的处理
         if found_improvement_section:
-            # 检查是否为列表项 (-, *, 1.)
             is_list_item = ( stripped_line.startswith(('-', '*')) or (stripped_line and stripped_line[0].isdigit() and stripped_line[1:].startswith('.')) )
             
             if is_list_item:
                 bullet_count += 1
                 if bullet_count == 1:
-                    # 只保留第一条问题
                     output_lines.append(line)
                 else:
-                    # 遇到第二条问题时，立即停止处理
                     break
             else:
-                # 保留非列表项的文本 (例如该段落的介绍语)
                 if bullet_count < 2:
                     output_lines.append(line)
 
-    # 4. 追加付费墙提示信息
     truncated_content = "\n".join(output_lines)
     
     paywall_message = (
@@ -234,19 +237,13 @@ def health_check():
 # ==========================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # 处理预检请求 (OPTIONS)
+    # ✅ 关键修复：显式处理 OPTIONS 预检请求
     if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
+        response = make_response()
+        return add_cors_headers(response)
     
     logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
     
-    # API Key 验证 (可选，如果前端没传可以注释掉)
-    api_key = request.headers.get('X-API-Key') or request.args.get('api_key')
-    if WP_API_KEY and api_key != WP_API_KEY:
-        logger.warning("Invalid API Key attempt")
-        # return jsonify({"error": "Invalid or missing API key"}), 401 
-        # 暂时注释掉 401，以免前端没配 Key 导致调不通，正式上线可开启
-
     try:
         data = request.json
         if not data:
@@ -255,7 +252,7 @@ def analyze_fengshui():
         grid_data = data.get('gridData', {})
         is_paid = data.get('isPaid', False) 
         
-        # 1. 处理个人信息与命卦 (V2 特性)
+        # 1. 处理个人信息与命卦
         personal_info = data.get('personalInfo', {})
         gender = personal_info.get('gender', '')
         birth_date = personal_info.get('birthDate', '')
@@ -345,7 +342,6 @@ def analyze_fengshui():
 
         # 3. 调用 AI
         logger.info(f"📝 Calling Qwen API (qwen-plus)...")
-        # 使用 dashscope.Generation.call (兼容旧版和新版SDK)
         response = dashscope.Generation.call(
             model='qwen-plus', 
             messages=[
@@ -358,7 +354,7 @@ def analyze_fengshui():
         if response.status_code == HTTPStatus.OK:
             full_analysis = response.output.choices[0].message.content
             
-            # 4. 生成 Report ID 并存储完整版 (V2 特性)
+            # 4. 生成 Report ID 并存储完整版
             report_id = str(uuid.uuid4())
             
             reports_db[report_id] = {
@@ -368,12 +364,11 @@ def analyze_fengshui():
                 "favorableDirections": favorable_directions
             }
             
-            # 5. 根据付费状态决定返回内容 (V2 特性)
+            # 5. 根据付费状态决定返回内容
             final_content = full_analysis
             is_locked = False
             
             if not is_paid:
-                # 应用截断逻辑
                 final_content = filter_report_for_free_tier(full_analysis)
                 is_locked = True
                 logger.info(f"✂️ Returning TRUNCATED report for ID: {report_id}")
@@ -400,13 +395,14 @@ def analyze_fengshui():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================
-#  接口 2: 验证订单号并解锁报告 (已针对 SiteGround 优化)
+#  接口 2: 验证订单号并解锁报告
 # ==========================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
-    # 处理预检请求
+    # ✅ 关键修复：显式处理 OPTIONS 预检请求
     if request.method == 'OPTIONS':
-        return jsonify({'status': 'ok'}), 200
+        response = make_response()
+        return add_cors_headers(response)
         
     data = request.json
     report_id = data.get('reportId')
@@ -419,16 +415,13 @@ def unlock_report():
     if not order_id:
         return jsonify({"success": False, "error": "Please enter your Order ID."}), 400
 
-    # 2. 去 WooCommerce 查单 (核心逻辑)
+    # 2. 去 WooCommerce 查单
     logger.info(f"🔍 Verifying Order ID: {order_id} for Report: {report_id}")
     
     try:
-        # --- 修复 1: URL 格式化 ---
-        # 去掉 WOO_URL 结尾可能存在的斜杠，防止出现 "com//wp-json"
         base_url = WOO_URL.rstrip('/')
         wc_api_url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
-        # --- 修复 2: 添加 User-Agent 头 (SiteGround 必须项) ---
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
         }
@@ -436,11 +429,10 @@ def unlock_report():
         response = requests.get(
             wc_api_url, 
             auth=(WOO_CK, WOO_CS),
-            headers=headers, # <--- 关键：带上伪装头
-            timeout=15       # 稍微延长超时时间
+            headers=headers,
+            timeout=15
         )
         
-        # 调试日志：如果报错，可以在 Render 后台看到具体原因
         if response.status_code != 200:
             logger.warning(f"❌ Order check failed. Status: {response.status_code}, Body: {response.text}")
             return jsonify({"success": False, "error": "Invalid Order ID or Order not found."}), 404
@@ -449,7 +441,6 @@ def unlock_report():
         order_status = order_data.get('status')
         
         # 3. 验证订单状态
-        # 允许的状态: completed (完成), processing (处理中 - PayPal 付款后通常是这个)
         valid_statuses = ['completed', 'processing']
         
         if order_status in valid_statuses:
@@ -459,7 +450,7 @@ def unlock_report():
             return jsonify({
                 "success": True,
                 "reportId": report_id,
-                "analysis": report_data['full_content'], # 返回完整内容
+                "analysis": report_data['full_content'],
                 "isLocked": False,
                 "kua": report_data.get('kua'),
                 "favorableDirections": report_data.get('favorableDirections')
@@ -473,3 +464,10 @@ def unlock_report():
     except Exception as e:
         logger.error(f"❌ WooCommerce API Error: {str(e)}")
         return jsonify({"success": False, "error": "Verification failed. Please try again."}), 500
+
+# ==========================================
+#  启动应用
+# ==========================================
+if __name__ == '__main__':
+    port = int(os.environ.get('PORT', 5000))
+    app.run(host='0.0.0.0', port=port, debug=False)
