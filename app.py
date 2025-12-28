@@ -400,7 +400,7 @@ def analyze_fengshui():
         return jsonify({"success": False, "error": str(e)}), 500
 
 # ==========================================
-#  接口 2: 验证订单号并解锁报告 (修改版)
+#  接口 2: 验证订单号并解锁报告 (已针对 SiteGround 优化)
 # ==========================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
@@ -410,7 +410,7 @@ def unlock_report():
         
     data = request.json
     report_id = data.get('reportId')
-    order_id = data.get('orderId') # 新增：获取用户输入的订单号
+    order_id = data.get('orderId')
     
     # 1. 基础检查
     if not report_id or report_id not in reports_db:
@@ -423,25 +423,33 @@ def unlock_report():
     logger.info(f"🔍 Verifying Order ID: {order_id} for Report: {report_id}")
     
     try:
-        # 构造 WooCommerce API URL
-        # 注意：WooCommerce 订单号通常是数字
-        wc_api_url = f"{WOO_URL}/wp-json/wc/v3/orders/{order_id}"
+        # --- 修复 1: URL 格式化 ---
+        # 去掉 WOO_URL 结尾可能存在的斜杠，防止出现 "com//wp-json"
+        base_url = WOO_URL.rstrip('/')
+        wc_api_url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
+        # --- 修复 2: 添加 User-Agent 头 (SiteGround 必须项) ---
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        }
+
         response = requests.get(
             wc_api_url, 
             auth=(WOO_CK, WOO_CS),
-            timeout=10
+            headers=headers, # <--- 关键：带上伪装头
+            timeout=15       # 稍微延长超时时间
         )
         
+        # 调试日志：如果报错，可以在 Render 后台看到具体原因
         if response.status_code != 200:
-            logger.warning(f"❌ Order check failed: {response.status_code}")
+            logger.warning(f"❌ Order check failed. Status: {response.status_code}, Body: {response.text}")
             return jsonify({"success": False, "error": "Invalid Order ID or Order not found."}), 404
             
         order_data = response.json()
         order_status = order_data.get('status')
         
         # 3. 验证订单状态
-        # 允许的状态: completed (完成), processing (处理中 - 用户付完款通常是这个状态)
+        # 允许的状态: completed (完成), processing (处理中 - PayPal 付款后通常是这个)
         valid_statuses = ['completed', 'processing']
         
         if order_status in valid_statuses:
