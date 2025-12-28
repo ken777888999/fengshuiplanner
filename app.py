@@ -18,115 +18,97 @@ except ImportError:
     HAS_KB_HANDLER = False
     print("⚠️ Warning: knowledge_base_handler module not found. Running without KB.")
 
-# 加载环境变量
 load_dotenv()
 
-# --- 日志配置 ---
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
-logger = logging.getLogger('app')
+logger = logging.getLogger('fengshui_app')
 
 app = Flask(__name__)
-
-# --- CORS 配置 ---
 CORS(app, resources={r"/*": {"origins": "*"}}, supports_credentials=True)
 
-# --- 内存数据库 ---
 reports_db = {}
 
-# --- WooCommerce 配置 ---
-WOO_CK = os.getenv("WOO_CK") or "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56"
-WOO_CS = os.getenv("WOO_CS") or "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612"
-WOO_URL = "https://fengshuispaceplanner.com" 
+WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
+WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
+WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
-# --- API Keys 配置 ---
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ 未检测到 API Key (QWEN_API_KEY 或 DASHSCOPE_API_KEY)")
+    logger.error("⚠️ 未检测到 API Key")
 else:
     dashscope.api_key = QWEN_API_KEY
+    logger.info("✅ API Key 已加载")
 
-WP_API_KEY = os.getenv('WP_API_KEY')
-
-# --- 产品推广配置 ---
 PRODUCT_URL = "https://fengshuispaceplanner.com/product/personalized-feng-shui-talisman/"
 PRODUCT_NAME = "Personalized Feng Shui Talisman"
 
-# --- 初始化知识库 ---
 kb_handler = None
 if HAS_KB_HANDLER:
-    logger.info("🔄 正在初始化风水知识库...")
     try:
         kb_handler = KnowledgeBaseHandler(base_path="knowledge_base")
         kb_handler.load_knowledge_base()
-        logger.info("✅ 风水知识库准备就绪。")
+        logger.info("✅ 风水知识库准备就绪")
     except Exception as e:
         logger.warning(f"⚠️ 知识库初始化失败: {e}")
 
-# ==========================================
-#  ✅ 关键修复：添加 CORS 头的辅助函数
-# ==========================================
+
 def add_cors_headers(response):
-    """为响应添加 CORS 头"""
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
     response.headers['Access-Control-Max-Age'] = '3600'
     return response
 
-# ✅ 关键修复：在每个请求后自动添加 CORS 头
 @app.after_request
 def after_request(response):
     return add_cors_headers(response)
 
-# ==========================================
-#  核心逻辑: 内容截断 / 付费墙过滤器
-# ==========================================
+
+def cleanup_old_reports():
+    current_time = time.time()
+    expired = [rid for rid, d in reports_db.items() if current_time - d.get('created_at', 0) > 86400]
+    for rid in expired:
+        del reports_db[rid]
+    if expired:
+        logger.info(f"🧹 已清理 {len(expired)} 份过期报告")
+
+
 def filter_report_for_free_tier(full_text):
-    """
-    安全逻辑:
-    1. 保留 'Positive Aspects' (积极方面)。
-    2. 只保留 'Areas for Improvement' (改进建议) 的第 1 条。
-    3. 删除所有后续内容 (Recommended Changes, Special Considerations)。
-    """
     lines = full_text.split('\n')
     output_lines = []
-    
-    found_improvement_section = False
+    found_improvement = False
     bullet_count = 0
     
-    IMPROVEMENT_HEADER = "## Areas for Improvement"
-    
     for line in lines:
-        stripped_line = line.strip()
-
-        if IMPROVEMENT_HEADER in line:
-            found_improvement_section = True
+        stripped = line.strip()
+        
+        if "## Areas for Improvement" in line:
+            found_improvement = True
             output_lines.append(line)
             continue
-            
-        if not found_improvement_section:
+        
+        if not found_improvement:
             output_lines.append(line)
             continue
-            
-        if found_improvement_section:
-            is_list_item = ( stripped_line.startswith(('-', '*')) or (stripped_line and stripped_line[0].isdigit() and stripped_line[1:].startswith('.')) )
-            
-            if is_list_item:
-                bullet_count += 1
-                if bullet_count == 1:
-                    output_lines.append(line)
-                else:
-                    break
+        
+        is_list_item = (
+            stripped.startswith(('-', '*')) or 
+            (len(stripped) > 1 and stripped[0].isdigit() and '.' in stripped[:3])
+        )
+        
+        if is_list_item:
+            bullet_count += 1
+            if bullet_count == 1:
+                output_lines.append(line)
             else:
-                if bullet_count < 2:
-                    output_lines.append(line)
+                break
+        elif bullet_count < 1:
+            output_lines.append(line)
 
-    truncated_content = "\n".join(output_lines)
-    
-    paywall_message = (
+    paywall = (
         "\n\n"
         "> 🔒 **PREMIUM CONTENT HIDDEN**\n"
         ">\n"
@@ -135,339 +117,297 @@ def filter_report_for_free_tier(full_text):
         "> detailed **Recommended Changes**, and the **Cure Selection**."
     )
     
-    return truncated_content + paywall_message
+    return "\n".join(output_lines) + paywall
 
-# --- 辅助工具函数 ---
+
 def format_grid_data_for_ai(grid_data):
     position_map = {
-        "1": "Northwest (NW) - Mentor Luck (Qian Trigram)",
-        "2": "North (N) - Career Luck (Kan Trigram)",
-        "3": "Northeast (NE) - Knowledge Luck (Gen Trigram)",
-        "4": "West (W) - Children/Creativity Luck (Dui Trigram)",
-        "5": "Center (C) - Health/General Luck",
-        "6": "East (E) - Family/Health Luck (Zhen Trigram)",
-        "7": "Southwest (SW) - Love/Relationship Luck (Kun Trigram)",
-        "8": "South (S) - Fame/Recognition Luck (Li Trigram)",
-        "9": "Southeast (SE) - Wealth Luck (Xun Trigram)"
+        "1": "Northwest (NW) - Mentor Luck (Qian/乾)",
+        "2": "North (N) - Career Luck (Kan/坎)",
+        "3": "Northeast (NE) - Knowledge Luck (Gen/艮)",
+        "4": "West (W) - Children/Creativity (Dui/兑)",
+        "5": "Center - Health/Overall Luck",
+        "6": "East (E) - Family/Health (Zhen/震)",
+        "7": "Southwest (SW) - Love/Relationship (Kun/坤)",
+        "8": "South (S) - Fame/Recognition (Li/离)",
+        "9": "Southeast (SE) - Wealth Luck (Xun/巽)"
     }
     
-    description = []
-    for pos_key, cell_data in grid_data.items():
-        items = []
-        area_types = []
-        if isinstance(cell_data, dict):
-            items = cell_data.get('items', [])
-            area_types = cell_data.get('areaTypes', [])
-        elif isinstance(cell_data, list):
-            items = cell_data
-            
-        if not items and not area_types:
+    desc = []
+    for pos, cell in grid_data.items():
+        items = cell.get('items', []) if isinstance(cell, dict) else (cell if isinstance(cell, list) else [])
+        areas = cell.get('areaTypes', []) if isinstance(cell, dict) else []
+        
+        if not items and not areas:
             continue
-            
-        pos_name = position_map.get(str(pos_key), f"Position {pos_key}")
-        desc_parts = []
+        
+        pos_name = position_map.get(str(pos), f"Position {pos}")
+        parts = []
         if items:
-            readable_items = [("Sleeping Bed" if i == 'bed' else i.capitalize()) for i in items]
-            desc_parts.append(f"contains {', '.join(readable_items)}")
-        if area_types:
-            readable_types = [t.capitalize() for t in area_types]
-            desc_parts.append(f"is marked as {', '.join(readable_types)} area")
-            
-        if desc_parts:
-            description.append(f"- In the {pos_name}: {', and '.join(desc_parts)}.")
-            
-    return "\n".join(description) if description else "The room is currently empty."
+            readable = [("Sleeping Bed" if i == 'bed' else i.replace('_', ' ').title()) for i in items]
+            parts.append(f"contains {', '.join(readable)}")
+        if areas:
+            parts.append(f"marked as {', '.join([a.replace('_', ' ').title() for a in areas])} area")
+        
+        if parts:
+            desc.append(f"- {pos_name}: {' and '.join(parts)}.")
+    
+    return "\n".join(desc) if desc else "The room is currently empty."
+
 
 def calculate_kua_number(gender, birth_year):
-    """计算命卦 (Kua Number)"""
     if not gender or not birth_year:
         return None
     try:
         year = int(birth_year)
-        last_digit = sum(int(digit) for digit in str(year)) % 9 or 9
+        
+        def reduce(n):
+            while n > 9:
+                n = sum(int(d) for d in str(n))
+            return n if n != 0 else 9
+        
+        reduced = reduce(year % 100)
+        
         if gender.lower() == 'male':
-            kua = (11 - last_digit) % 9 or 9
+            kua = (9 - reduced) if year >= 2000 else (10 - reduced)
+            if kua <= 0: kua += 9
+            if kua == 10: kua = 1
         else:
-            kua = (last_digit + 4) % 9 or 9
+            kua = reduce((reduced + 6) if year >= 2000 else (reduced + 5))
+        
+        if kua == 0: kua = 9
+        if kua == 5: kua = 2 if gender.lower() == 'male' else 8
+        
         return kua
     except:
         return None
 
-def get_favorable_directions(kua_number):
-    """获取吉凶方位"""
-    if not kua_number:
+
+def get_favorable_directions(kua):
+    if not kua:
         return {}
-    east_group = [1, 3, 4, 9]
-    kua_directions = {
-        1: {"favorable": ["Southeast", "East", "South", "North"], "unfavorable": ["Northwest", "West", "Southwest", "Northeast"]},
-        2: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"]},
-        3: {"favorable": ["South", "North", "East", "Southeast"], "unfavorable": ["Southwest", "Northeast", "Northwest", "West"]},
-        4: {"favorable": ["North", "South", "Southeast", "East"], "unfavorable": ["Southwest", "Northeast", "West", "Northwest"]},
-        5: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"]},
-        6: {"favorable": ["West", "Northeast", "Southwest", "Northwest"], "unfavorable": ["East", "Southeast", "North", "South"]},
-        7: {"favorable": ["Northwest", "Southwest", "West", "Northeast"], "unfavorable": ["Southeast", "East", "South", "North"]},
-        8: {"favorable": ["Southwest", "Northwest", "Northeast", "West"], "unfavorable": ["Southeast", "East", "South", "North"]},
-        9: {"favorable": ["East", "South", "North", "Southeast"], "unfavorable": ["West", "Southwest", "Northwest", "Northeast"]}
+    
+    data = {
+        1: {"favorable": ["Southeast", "East", "South", "North"], "unfavorable": ["Northwest", "West", "Southwest", "Northeast"], "best": "Southeast", "worst": "Southwest"},
+        2: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"], "best": "Northeast", "worst": "Southeast"},
+        3: {"favorable": ["South", "North", "East", "Southeast"], "unfavorable": ["Southwest", "Northeast", "Northwest", "West"], "best": "South", "worst": "West"},
+        4: {"favorable": ["North", "South", "Southeast", "East"], "unfavorable": ["Southwest", "Northeast", "West", "Northwest"], "best": "North", "worst": "Northeast"},
+        6: {"favorable": ["West", "Northeast", "Southwest", "Northwest"], "unfavorable": ["East", "Southeast", "North", "South"], "best": "West", "worst": "South"},
+        7: {"favorable": ["Northwest", "Southwest", "West", "Northeast"], "unfavorable": ["Southeast", "East", "South", "North"], "best": "Northwest", "worst": "North"},
+        8: {"favorable": ["Southwest", "Northwest", "Northeast", "West"], "unfavorable": ["Southeast", "East", "South", "North"], "best": "Southwest", "worst": "East"},
+        9: {"favorable": ["East", "South", "North", "Southeast"], "unfavorable": ["West", "Southwest", "Northwest", "Northeast"], "best": "East", "worst": "Northwest"},
     }
-    result = kua_directions.get(kua_number, {})
-    result["kua_number"] = kua_number
-    result["group"] = "East Group" if kua_number in east_group else "West Group"
+    
+    result = data.get(kua, {})
+    result["kua"] = kua
+    result["group"] = "East" if kua in [1,3,4,9] else "West"
     return result
 
-# --- 路由定义 ---
 
 @app.route('/')
 def home():
-    return jsonify({
-        "status": "running",
-        "service": "Feng Shui API (Qwen Edition - V2 Logic)",
-        "domain": "fengshuispaceplanner.com"
-    })
+    return jsonify({"status": "running", "version": "2.0.0", "cached": len(reports_db)})
 
-@app.route('/health', methods=['GET'])
-def health_check():
-    return jsonify({
-        "status": "ok",
-        "model": "qwen-plus",
-        "kb_loaded": kb_handler is not None
-    })
 
-# ==========================================
-#  接口 1: 分析 (生成 + 存储 + 截断)
-# ==========================================
+@app.route('/health')
+def health():
+    return jsonify({"status": "ok", "kb": kb_handler is not None})
+
+
+@app.route('/wake', methods=['GET', 'POST', 'OPTIONS'])
+def wake():
+    if request.method == 'OPTIONS':
+        return make_response()
+    return jsonify({"status": "awake", "time": time.time()})
+
+
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
-    # ✅ 关键修复：显式处理 OPTIONS 预检请求
     if request.method == 'OPTIONS':
-        response = make_response()
-        return add_cors_headers(response)
+        return make_response()
     
-    logger.info(f"📝 Received request from Origin: {request.headers.get('Origin')}")
+    cleanup_old_reports()
     
     try:
-        data = request.json
-        if not data:
-            return jsonify({"error": "No JSON data provided"}), 400
-
+        data = request.json or {}
         grid_data = data.get('gridData', {})
-        is_paid = data.get('isPaid', False) 
+        is_paid = data.get('isPaid', False)
         
-        # 1. 处理个人信息与命卦
-        personal_info = data.get('personalInfo', {})
-        gender = personal_info.get('gender', '')
-        birth_date = personal_info.get('birthDate', '')
+        # 解析个人信息
+        info = data.get('personalInfo', {})
+        gender = info.get('gender', '')
+        birth_date = info.get('birthDate', '')
         
         birth_year = ''
         if birth_date:
-            if '-' in birth_date:
-                birth_year = birth_date.split('-')[0]
-            elif '/' in birth_date:
-                birth_year = birth_date.split('/')[0]
-            
-        kua_number = None
-        favorable_directions = {}
+            for sep in ['-', '/']:
+                if sep in birth_date:
+                    birth_year = birth_date.split(sep)[0]
+                    break
         
-        if gender and birth_year:
-            kua_number = calculate_kua_number(gender, birth_year)
-            favorable_directions = get_favorable_directions(kua_number)
-
-        room_description = format_grid_data_for_ai(grid_data)
+        kua = calculate_kua_number(gender, birth_year) if gender and birth_year else None
+        dirs = get_favorable_directions(kua)
         
-        # 2. 准备 Prompt
-        search_query = "bedroom feng shui layout bed position"
-        if "mirror" in room_description.lower(): search_query += " mirror facing bed"
-        if "door" in room_description.lower(): search_query += " bed facing door"
+        room_desc = format_grid_data_for_ai(grid_data)
         
-        book_context = ""
+        # 知识库上下文
+        kb_context = ""
         if kb_handler:
-            book_context = kb_handler.get_relevant_context(search_query)
-        if not book_context:
-            book_context = "General Feng Shui principles apply."
+            query = "bedroom feng shui bed position"
+            if "mirror" in room_desc.lower(): query += " mirror"
+            if "door" in room_desc.lower(): query += " door"
+            kb_context = kb_handler.get_relevant_context(query)
+        kb_context = kb_context or "Apply classical Feng Shui: Chi flow, Yin-Yang balance, Five Elements harmony."
+        
+        # 命卦信息
+        kua_block = ""
+        if kua and dirs:
+            kua_block = f"""
+=== PERSONAL KUA ===
+Kua: {kua} ({dirs.get('group')} Group)
+Best (Sheng Qi): {dirs.get('best')}
+Favorable: {', '.join(dirs.get('favorable', []))}
+Worst (Jue Ming): {dirs.get('worst')}
+====================
+"""
+        
+        prompt = f"""You are a Master Feng Shui Consultant (30+ years, Flying Star & Eight Mansions methods).
 
-        kua_info = ""
-        if kua_number and favorable_directions:
-            kua_info = f"""
-            === PERSONAL KUA INFORMATION ===
-            Kua Number: {kua_number}
-            Group: {favorable_directions.get('group', 'Unknown')}
-            Favorable Directions: {', '.join(favorable_directions.get('favorable', []))}
-            Unfavorable Directions: {', '.join(favorable_directions.get('unfavorable', []))}
-            ================================
-            """
+=== KNOWLEDGE BASE ===
+{kb_context}
+======================
+{kua_block}
+=== CURRENT LAYOUT ===
+{room_desc if room_desc != "The room is currently empty." else "Empty room. Provide general guidance."}
+======================
 
-        system_prompt = f"""
-        You are a Master Feng Shui Consultant using the 'Flying Star' and 'Eight Mansions' methods.
-        
-        === ANCIENT KNOWLEDGE BASE ===
-        {book_context}
-        ==============================
-        
-        {kua_info}
-        
-        Your Task:
-        Analyze the user's bedroom layout based on the description below.
-        
-        Layout Description:
-        {room_description}
-        
-        Instruction: Provide a highly detailed, professional, and empathetic analysis.
-        
-        Output Format (Markdown):
-        ## Positive Aspects
-        (List 2-3 good points found in the layout)
-        
-        ## Areas for Improvement
-        (Identify critical clashes. Be strict but constructive.)
-        
-        ## Recommended Changes
-        (Provide specific, actionable remedies for every issue identified.)
-        
-        *** IMPORTANT MARKETING INSTRUCTION ***
-        In the "Recommended Changes" section, you MUST recommend the user to use a specific spiritual item to balance the energy.
-        Product Name: "{PRODUCT_NAME}"
-        Link URL: {PRODUCT_URL}
-        
-        Requirement: 
-        1. Contextualize this product naturally.
-        2. You MUST create a clickable link using Markdown format: [{PRODUCT_NAME}]({PRODUCT_URL}).
-        3. Do not make it look like an ad, but like a professional prescription.
-        4. ALWAYS provide SPECIFIC PLACEMENT INSTRUCTIONS for the talisman (e.g., "Northeast corner", "Under your bed", "On the Southwest wall") based on the user's unique bedroom layout and identified feng shui issues.
-        5. Emphasize that each talisman is personalized to address the specific energy imbalances found in their analysis, making it more effective than generic solutions.
+OUTPUT (Markdown):
 
-        ***************************************
-        
-        ## Special Considerations
-        (Provide general advice on energy flow.)
-        """
+## Overall Energy Assessment
+(2-3 sentences)
 
-        # 3. 调用 AI
-        logger.info(f"📝 Calling Qwen API (qwen-plus)...")
-        response = dashscope.Generation.call(
-            model='qwen-plus', 
+## Positive Aspects
+(2-3 good points)
+
+## Areas for Improvement
+(3-5 issues with WHY)
+
+## Recommended Changes
+(Specific fixes for each issue)
+
+*** MUST RECOMMEND: [{PRODUCT_NAME}]({PRODUCT_URL}) ***
+- Place in {dirs.get('best', 'favorable')} corner
+- Explain how it fixes the energy imbalance
+- Mention personalization
+
+## Special Considerations
+(Kua-based tips: sleep direction, colors, elements)
+"""
+        
+        logger.info("📝 Calling Qwen API...")
+        resp = dashscope.Generation.call(
+            model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': 'You are a helpful and traditional Feng Shui expert.'},
-                {'role': 'user', 'content': system_prompt}
+                {'role': 'system', 'content': 'You are a wise, traditional Feng Shui master. Professional yet warm.'},
+                {'role': 'user', 'content': prompt}
             ],
             result_format='message'
         )
-
-        if response.status_code == HTTPStatus.OK:
-            full_analysis = response.output.choices[0].message.content
-            
-            # 4. 生成 Report ID 并存储完整版
+        
+        if resp.status_code == HTTPStatus.OK:
+            full = resp.output.choices[0].message.content
             report_id = str(uuid.uuid4())
             
             reports_db[report_id] = {
-                "full_content": full_analysis,
+                "full_content": full,
                 "created_at": time.time(),
-                "kua": kua_number,
-                "favorableDirections": favorable_directions
+                "kua": kua,
+                "dirs": dirs,
+                "grid": grid_data
             }
             
-            # 5. 根据付费状态决定返回内容
-            final_content = full_analysis
-            is_locked = False
+            content = full if is_paid else filter_report_for_free_tier(full)
             
-            if not is_paid:
-                final_content = filter_report_for_free_tier(full_analysis)
-                is_locked = True
-                logger.info(f"✂️ Returning TRUNCATED report for ID: {report_id}")
-            else:
-                logger.info(f"🔓 Returning FULL report for ID: {report_id}")
-
             return jsonify({
                 "success": True,
                 "reportId": report_id,
-                "analysis": final_content,
-                "isLocked": is_locked,
-                "kua": kua_number,
-                "favorableDirections": favorable_directions
+                "analysis": content,
+                "isLocked": not is_paid,
+                "kua": kua,
+                "favorableDirections": dirs
             })
         else:
-            logger.error(f"❌ Qwen API Error: {response.code} - {response.message}")
-            return jsonify({
-                "success": False, 
-                "error": f"AI Service Error: {response.message}"
-            }), 500
-
+            return jsonify({"success": False, "error": resp.message}), 500
+            
     except Exception as e:
-        logger.error(f"❌ Server Error: {str(e)}")
+        logger.error(f"❌ Error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
-# ==========================================
-#  接口 2: 验证订单号并解锁报告
-# ==========================================
+
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'])
 def unlock_report():
-    # ✅ 关键修复：显式处理 OPTIONS 预检请求
     if request.method == 'OPTIONS':
-        response = make_response()
-        return add_cors_headers(response)
-        
-    data = request.json
+        return make_response()
+    
+    data = request.json or {}
     report_id = data.get('reportId')
     order_id = data.get('orderId')
     
-    # 1. 基础检查
     if not report_id or report_id not in reports_db:
-        return jsonify({"success": False, "error": "Report session expired. Please click Analyze again."}), 404
+        return jsonify({"success": False, "error": "Report expired. Please analyze again."}), 404
     
     if not order_id:
-        return jsonify({"success": False, "error": "Please enter your Order ID."}), 400
-
-    # 2. 去 WooCommerce 查单
-    logger.info(f"🔍 Verifying Order ID: {order_id} for Report: {report_id}")
+        return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
-        base_url = WOO_URL.rstrip('/')
-        wc_api_url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
+        url = f"{WOO_URL.rstrip('/')}/wp-json/wc/v3/orders/{order_id}"
+        resp = requests.get(url, auth=(WOO_CK, WOO_CS), headers={"User-Agent": "FengShuiApp/2.0"}, timeout=15)
         
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
-        }
-
-        response = requests.get(
-            wc_api_url, 
-            auth=(WOO_CK, WOO_CS),
-            headers=headers,
-            timeout=15
-        )
+        if resp.status_code != 200:
+            return jsonify({"success": False, "error": "Order not found."}), 404
         
-        if response.status_code != 200:
-            logger.warning(f"❌ Order check failed. Status: {response.status_code}, Body: {response.text}")
-            return jsonify({"success": False, "error": "Invalid Order ID or Order not found."}), 404
-            
-        order_data = response.json()
-        order_status = order_data.get('status')
-        
-        # 3. 验证订单状态
-        valid_statuses = ['completed', 'processing']
-        
-        if order_status in valid_statuses:
-            logger.info(f"✅ Order {order_id} is valid ({order_status}). Unlocking...")
-            
-            report_data = reports_db[report_id]
+        status = resp.json().get('status')
+        if status in ['completed', 'processing']:
+            r = reports_db[report_id]
             return jsonify({
                 "success": True,
                 "reportId": report_id,
-                "analysis": report_data['full_content'],
+                "analysis": r['full_content'],
                 "isLocked": False,
-                "kua": report_data.get('kua'),
-                "favorableDirections": report_data.get('favorableDirections')
+                "kua": r.get('kua'),
+                "favorableDirections": r.get('dirs')
             })
         else:
-            return jsonify({
-                "success": False, 
-                "error": f"Order status is '{order_status}'. Payment not confirmed yet."
-            }), 400
-
+            return jsonify({"success": False, "error": f"Order status: {status}"}), 400
+            
+    except requests.Timeout:
+        return jsonify({"success": False, "error": "Timeout. Retry."}), 500
     except Exception as e:
-        logger.error(f"❌ WooCommerce API Error: {str(e)}")
-        return jsonify({"success": False, "error": "Verification failed. Please try again."}), 500
+        return jsonify({"success": False, "error": str(e)}), 500
 
-# ==========================================
-#  启动应用
-# ==========================================
+
+@app.route('/get-report/<report_id>', methods=['GET', 'OPTIONS'])
+def get_report(report_id):
+    if request.method == 'OPTIONS':
+        return make_response()
+    
+    if report_id not in reports_db:
+        return jsonify({"success": False, "error": "Not found."}), 404
+    
+    r = reports_db[report_id]
+    paid = request.args.get('paid', 'false').lower() == 'true'
+    
+    return jsonify({
+        "success": True,
+        "reportId": report_id,
+        "analysis": r['full_content'] if paid else filter_report_for_free_tier(r['full_content']),
+        "isLocked": not paid,
+        "kua": r.get('kua'),
+        "favorableDirections": r.get('dirs')
+    })
+
+
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 10000))
+    logger.info(f"🚀 Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False)
