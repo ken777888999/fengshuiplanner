@@ -4,6 +4,7 @@ import json
 import logging
 import uuid
 import time
+import re
 from http import HTTPStatus
 from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
@@ -106,6 +107,20 @@ def handle_options():
         response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
         response.headers['Access-Control-Max-Age'] = '3600'
         return response
+
+
+# ============================================================
+# ✅ 新增: 清理 Markdown 包装的函数
+# ============================================================
+def clean_markdown_wrapper(text):
+    """去掉 AI 返回的 ```markdown 包装"""
+    if not text:
+        return text
+    # 去掉开头的 ```markdown 或 ```
+    text = re.sub(r'^```(?:markdown)?\s*\n?', '', text.strip())
+    # 去掉结尾的 ```
+    text = re.sub(r'\n?```\s*$', '', text)
+    return text.strip()
 
 
 def cleanup_old_reports():
@@ -330,7 +345,7 @@ Include: [{PRODUCT_NAME}]({PRODUCT_URL}) for {dirs.get('best', 'favorable')} cor
         resp = dashscope.Generation.call(
             model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses.'},
+                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks.'},
                 {'role': 'user', 'content': prompt}
             ],
             result_format='message',
@@ -339,6 +354,7 @@ Include: [{PRODUCT_NAME}]({PRODUCT_URL}) for {dirs.get('best', 'favorable')} cor
         
         if resp.status_code == HTTPStatus.OK:
             full = resp.output.choices[0].message.content
+            full = clean_markdown_wrapper(full)  # ✅ 清理 Markdown 包装
             report_id = str(uuid.uuid4())
             
             reports_db[report_id] = {
