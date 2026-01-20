@@ -44,7 +44,7 @@ CORS(app,
 reports_db = {}
 
 WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
-WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a8183f79dd3c8ba76612")
+WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
