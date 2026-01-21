@@ -11,9 +11,9 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
-from functools import wraps
+import cloudscraper  # ✅ NEW IMPORT
 
-# --- 自定义模块引入 ---
+# --- Custom Module Import ---
 try:
     from knowledge_base_handler import KnowledgeBaseHandler
     HAS_KB_HANDLER = True
@@ -32,7 +32,7 @@ logger = logging.getLogger('fengshui_app')
 app = Flask(__name__)
 
 # ============================================================
-# ✅ CORS 配置
+# ✅ CORS Configuration
 # ============================================================
 CORS(app, 
      resources={r"/*": {"origins": "*"}},
@@ -50,12 +50,12 @@ WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ 未检测到 API Key")
+    logger.error("⚠️ API Key not detected")
 else:
     dashscope.api_key = QWEN_API_KEY
-    logger.info("✅ API Key 已加载")
+    logger.info("✅ API Key loaded")
 
-# ✅ 产品信息配置
+# ✅ Product Info Configuration
 PRODUCT_URL = "https://fengshuispaceplanner.com/product/personalized-feng-shui-talisman/"
 PRODUCT_NAME = "Personalized Feng Shui Talisman"
 
@@ -64,13 +64,13 @@ if HAS_KB_HANDLER:
     try:
         kb_handler = KnowledgeBaseHandler(base_path="knowledge_base")
         kb_handler.load_knowledge_base()
-        logger.info("✅ 风水知识库准备就绪")
+        logger.info("✅ Feng Shui KB ready")
     except Exception as e:
-        logger.warning(f"⚠️ 知识库初始化失败: {e}")
+        logger.warning(f"⚠️ KB init failed: {e}")
 
 
 # ============================================================
-# ✅ CORS 头装饰器
+# ✅ CORS Headers Decorator
 # ============================================================
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -96,7 +96,7 @@ def handle_options():
 
 
 # ============================================================
-# ✅ 工具函数 (保持不变)
+# ✅ Utility Functions
 # ============================================================
 def clean_markdown_wrapper(text):
     if not text: return text
@@ -215,7 +215,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.1.1-FULL", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.1.2-CLOUDSCRAPER", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -225,7 +225,6 @@ def health():
 def wake():
     return jsonify({"status": "awake", "time": time.time()})
 
-# ✅ 保留原有的调试路由
 @app.route('/debug-routes')
 def debug_routes():
     output = []
@@ -236,7 +235,7 @@ def debug_routes():
     return "<br>".join(output)
 
 # ============================================================
-# ✅ 核心修改 1：重命名为 /process-layout (原 analyze-fengshui)
+# ✅ /process-layout
 # ============================================================
 @app.route('/process-layout', methods=['POST', 'OPTIONS'])
 def process_layout():
@@ -337,11 +336,10 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ 核心修改 2：重命名为 /verify-purchase (原 unlock-report)
+# ✅ /verify-purchase (Updated with Cloudscraper)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
-    # 显式处理 OPTIONS 请求
     if request.method == 'OPTIONS':
         return jsonify({"status": "ok"}), 200
 
@@ -349,10 +347,10 @@ def verify_purchase():
     report_id = data.get('reportId')
     order_id = data.get('orderId')
     
-    logger.info(f"🔓 收到验证请求. Report: {report_id}, Order: {order_id}")
+    logger.info(f"🔓 Verify Request. Report: {report_id}, Order: {order_id}")
 
     if not report_id or report_id not in reports_db:
-        logger.warning(f"❌ 报告未找到: {report_id}")
+        logger.warning(f"❌ Report not found: {report_id}")
         return jsonify({"success": False, "error": "Report expired. Please analyze again."}), 404
     
     if not order_id:
@@ -362,34 +360,30 @@ def verify_purchase():
         base_url = WOO_URL.rstrip('/')
         url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
-        logger.info(f"🔍 正在向 WooCommerce 验证: {url}")
+        logger.info(f"🔍 Verifying with WooCommerce via Cloudscraper: {url}")
         
-        # ✅ 关键修复：伪装成真实浏览器，防止 SiteGround 拦截
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Connection": "keep-alive"
-        }
-
-        resp = requests.get(
+        # ✅ FIX: Use Cloudscraper to bypass SiteGround/Cloudflare
+        scraper = cloudscraper.create_scraper()
+        
+        # WooCommerce requires Basic Auth. Cloudscraper handles auth nicely.
+        resp = scraper.get(
             url, 
-            auth=(WOO_CK, WOO_CS), 
-            headers=headers, 
-            timeout=15
+            auth=(WOO_CK, WOO_CS),
+            timeout=20
         )
         
-        # SiteGround 可能会返回验证码页面，检测这种情况
+        # Check for SiteGround CAPTCHA again (just in case)
         if "sgcaptcha" in resp.text:
-            logger.error("❌ 严重错误: 请求被 SiteGround 安全插件拦截。")
+            logger.error("❌ CRITICAL: Cloudscraper failed to bypass SiteGround security.")
             return jsonify({"success": False, "error": "Server connection blocked by website security."}), 500
 
         if resp.status_code != 200:
-            logger.error(f"❌ WooCommerce 错误 {resp.status_code}")
+            logger.error(f"❌ WooCommerce Error {resp.status_code}: {resp.text[:100]}")
             return jsonify({"success": False, "error": "Order not found."}), 404
         
         order_data = resp.json()
         status = order_data.get('status')
-        logger.info(f"✅ 订单状态: {status}")
+        logger.info(f"✅ Order Status: {status}")
 
         if status in ['completed', 'processing']:
             r = reports_db[report_id]
@@ -405,12 +399,12 @@ def verify_purchase():
             return jsonify({"success": False, "error": f"Order status is '{status}', waiting for completion."}), 400
             
     except Exception as e:
-        logger.error(f"❌ 验证异常: {str(e)}")
+        logger.error(f"❌ Verify Exception: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============================================================
-# ✅ 保留原有的 get-report 路由
+# ✅ /get-report
 # ============================================================
 @app.route('/get-report/<report_id>', methods=['GET', 'OPTIONS'])
 @app.route('/get-report', methods=['GET', 'OPTIONS'])
@@ -434,7 +428,7 @@ def get_report(report_id=None):
     })
 
 # ============================================================
-# ✅ 错误处理 (保持不变)
+# ✅ Error Handlers
 # ============================================================
 @app.errorhandler(Exception)
 def handle_exception(e):
