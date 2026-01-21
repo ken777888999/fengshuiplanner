@@ -215,7 +215,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.1.2-CLOUDSCRAPER", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.1.3-CLOUDSCRAPER-FIX", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -336,7 +336,7 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ /verify-purchase (Updated with Cloudscraper)
+# ✅ /verify-purchase (Updated with Cloudscraper & Headers)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -362,13 +362,30 @@ def verify_purchase():
         
         logger.info(f"🔍 Verifying with WooCommerce via Cloudscraper: {url}")
         
-        # ✅ FIX: Use Cloudscraper to bypass SiteGround/Cloudflare
-        scraper = cloudscraper.create_scraper()
+        # ✅ FIX: Use Cloudscraper with forced Browser Headers to bypass SiteGround
+        # 强制模拟 Windows 上的 Chrome 浏览器
+        scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
+        
+        # 添加完整的浏览器头部信息，欺骗防火墙
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Referer": "https://fengshuispaceplanner.com/",
+            "Origin": "https://fengshuispaceplanner.com",
+            "X-Requested-With": "XMLHttpRequest"
+        }
         
         # WooCommerce requires Basic Auth. Cloudscraper handles auth nicely.
         resp = scraper.get(
             url, 
             auth=(WOO_CK, WOO_CS),
+            headers=headers,  # <--- 重要：添加 headers
             timeout=20
         )
         
