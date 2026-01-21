@@ -216,7 +216,7 @@ def get_favorable_directions(kua):
 @app.route('/')
 def home():
     # ✅ 修改：更新版本号以便确认部署
-    return jsonify({"status": "running", "version": "2.0.5", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.0.6", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -342,7 +342,7 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ 修复后的 unlock-report 路由
+# ✅ 修复后的 unlock-report 路由 (解决 SiteGround 拦截问题)
 # ============================================================
 @app.route('/unlock-report', methods=['POST', 'OPTIONS'], strict_slashes=False)
 def unlock_report():
@@ -371,15 +371,28 @@ def unlock_report():
         
         logger.info(f"🔍 正在向 WooCommerce 验证: {url}")
         
+        # ✅ 关键修复：伪装成真实浏览器，绕过 SiteGround 的机器人拦截
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Connection": "keep-alive"
+        }
+
         resp = requests.get(
             url, 
             auth=(WOO_CK, WOO_CS), 
-            headers={"User-Agent": "FengShuiApp/2.0"}, 
+            headers=headers, # 使用伪装头
             timeout=15
         )
         
+        # 增加对 SiteGround 验证码页面的特殊检测
+        if "sgcaptcha" in resp.text:
+            logger.error("❌ 严重错误: 请求被 SiteGround 安全插件拦截 (Blocked by SiteGround Security).")
+            logger.error("👉 请在 SiteGround 后台将 Render 服务器 IP 添加到白名单，或关闭 'Browser Integrity Check'。")
+            return jsonify({"success": False, "error": "Server connection blocked by website security. Please contact support."}), 500
+
         if resp.status_code != 200:
-            logger.error(f"❌ WooCommerce 错误 {resp.status_code}: {resp.text}")
+            logger.error(f"❌ WooCommerce 错误 {resp.status_code}: {resp.text[:200]}")
             return jsonify({"success": False, "error": "Order not found."}), 404
         
         order_data = resp.json()
