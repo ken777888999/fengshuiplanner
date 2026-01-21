@@ -378,6 +378,7 @@ def verify_purchase():
             timeout=15
         )
         
+        # SiteGround 可能会返回验证码页面，检测这种情况
         if "sgcaptcha" in resp.text:
             logger.error("❌ 严重错误: 请求被 SiteGround 安全插件拦截。")
             return jsonify({"success": False, "error": "Server connection blocked by website security."}), 500
@@ -458,4 +459,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🚀 Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
-
