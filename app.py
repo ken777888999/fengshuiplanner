@@ -5,6 +5,7 @@ import logging
 import uuid
 import time
 import re
+import urllib.parse  # 添加了这个用于调试路由
 from http import HTTPStatus
 from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
@@ -31,7 +32,7 @@ logger = logging.getLogger('fengshui_app')
 app = Flask(__name__)
 
 # ============================================================
-# ✅ CORS 配置 (保持不变)
+# ✅ CORS 配置
 # ============================================================
 CORS(app, 
      resources={r"/*": {"origins": "*"}},
@@ -69,7 +70,7 @@ if HAS_KB_HANDLER:
 
 
 # ============================================================
-# ✅ CORS 头装饰器 (保持不变)
+# ✅ CORS 头装饰器
 # ============================================================
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -95,7 +96,7 @@ def handle_options():
 
 
 # ============================================================
-# ✅ 工具函数 (保持不变)
+# ✅ 工具函数
 # ============================================================
 def clean_markdown_wrapper(text):
     if not text: return text
@@ -214,7 +215,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.0.2", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.0.3", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -224,10 +225,22 @@ def health():
 def wake():
     return jsonify({"status": "awake", "time": time.time()})
 
+# ============================================================
+# ✅ 这里的 DEBUG 路由是新增的！
+# ============================================================
+@app.route('/debug-routes')
+def debug_routes():
+    """
+    列出所有已注册的路由，用于排查 404 问题。
+    """
+    output = []
+    for rule in app.url_map.iter_rules():
+        methods = ','.join(rule.methods)
+        line = urllib.parse.unquote("{:50s} {}".format(str(rule), methods))
+        output.append(line)
+    return "<pre>" + "\n".join(output) + "</pre>"
 
-# ============================================================
-# ✅ 核心修改处: analyze-fengshui
-# ============================================================
+
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
     cleanup_old_reports()
@@ -256,9 +269,6 @@ def analyze_fengshui():
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        # ---------------------------------------------------------
-        # 👇 这里的 Prompt 经过了微调，严格执行您的营销策略
-        # ---------------------------------------------------------
         prompt = f"""Feng Shui Master analysis for bedroom layout.
 
 Layout: {room_desc}
@@ -282,7 +292,6 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 ## Special Tips
 (1-2 personalized tips)"""        
-        # ---------------------------------------------------------
 
         logger.info("📝 Calling Qwen API...")
         
@@ -387,7 +396,7 @@ def get_report(report_id):
     })
 
 # ============================================================
-# ✅ 错误处理 (保持不变)
+# ✅ 错误处理
 # ============================================================
 @app.errorhandler(Exception)
 def handle_exception(e):
