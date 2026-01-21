@@ -5,7 +5,7 @@ import logging
 import uuid
 import time
 import re
-import urllib.parse  # ✅ 新增：用于调试路由解码
+import urllib.parse
 from http import HTTPStatus
 from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
@@ -216,7 +216,7 @@ def get_favorable_directions(kua):
 @app.route('/')
 def home():
     # ✅ 修改：更新版本号以便确认部署
-    return jsonify({"status": "running", "version": "2.0.4", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.0.5", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -341,26 +341,52 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
         return jsonify({"success": False, "error": str(e)}), 500
 
 
-@app.route('/unlock-report', methods=['POST', 'OPTIONS'])
+# ============================================================
+# ✅ 修复后的 unlock-report 路由
+# ============================================================
+@app.route('/unlock-report', methods=['POST', 'OPTIONS'], strict_slashes=False)
 def unlock_report():
+    # 显式处理 OPTIONS 请求
+    if request.method == 'OPTIONS':
+        return jsonify({"status": "ok"}), 200
+
     data = request.json or {}
     report_id = data.get('reportId')
     order_id = data.get('orderId')
     
+    logger.info(f"🔓 收到解锁请求 (Unlock request received). Report: {report_id}, Order: {order_id}")
+
     if not report_id or report_id not in reports_db:
+        logger.warning(f"❌ 报告未找到 (Report not found): {report_id}")
         return jsonify({"success": False, "error": "Report expired. Please analyze again."}), 404
     
     if not order_id:
+        logger.warning("❌ 缺少订单号 (Missing Order ID)")
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
-        url = f"{WOO_URL.rstrip('/')}/wp-json/wc/v3/orders/{order_id}"
-        resp = requests.get(url, auth=(WOO_CK, WOO_CS), headers={"User-Agent": "FengShuiApp/2.0"}, timeout=15)
+        # 去除 WOO_URL 末尾可能多余的斜杠
+        base_url = WOO_URL.rstrip('/')
+        url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
+        
+        logger.info(f"🔍 正在向 WooCommerce 验证: {url}")
+        
+        resp = requests.get(
+            url, 
+            auth=(WOO_CK, WOO_CS), 
+            headers={"User-Agent": "FengShuiApp/2.0"}, 
+            timeout=15
+        )
         
         if resp.status_code != 200:
+            logger.error(f"❌ WooCommerce 错误 {resp.status_code}: {resp.text}")
             return jsonify({"success": False, "error": "Order not found."}), 404
         
-        status = resp.json().get('status')
+        order_data = resp.json()
+        status = order_data.get('status')
+        logger.info(f"✅ 订单状态: {status}")
+
+        # 允许 completed (完成) 或 processing (处理中) 的订单解锁
         if status in ['completed', 'processing']:
             r = reports_db[report_id]
             return jsonify({
@@ -372,11 +398,13 @@ def unlock_report():
                 "favorableDirections": r.get('dirs')
             })
         else:
-            return jsonify({"success": False, "error": f"Order status: {status}"}), 400
+            return jsonify({"success": False, "error": f"Order status is '{status}', waiting for completion."}), 400
             
     except requests.Timeout:
-        return jsonify({"success": False, "error": "Timeout. Retry."}), 500
+        logger.error("❌ WooCommerce 连接超时")
+        return jsonify({"success": False, "error": "Verification timed out. Please try again."}), 500
     except Exception as e:
+        logger.error(f"❌ 解锁异常: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
