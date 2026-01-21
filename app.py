@@ -11,7 +11,6 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
-# import cloudscraper  # ❌ 移除或注释掉，改用标准 requests 伪装 API 客户端
 
 # --- Custom Module Import ---
 try:
@@ -44,9 +43,13 @@ CORS(app,
 
 reports_db = {}
 
+# WooCommerce 配置 (虽然新接口主要用密钥，但保留这些配置以防万一)
 WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
 WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
+
+# ✅ 新增：与 PHP 端保持一致的密钥
+FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY", "fengshuispaceplannersupergirl")
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
@@ -215,7 +218,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.1.4-REQUESTS-FIX", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.2.0-CUSTOM-API", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -336,7 +339,7 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ /verify-purchase (Updated: API Client Masquerade)
+# ✅ /verify-purchase (UPDATED: Using Custom WP Endpoint)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -358,42 +361,44 @@ def verify_purchase():
     
     try:
         base_url = WOO_URL.rstrip('/')
-        url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
-        logger.info(f"🔍 Verifying with WooCommerce via Standard Requests: {url}")
+        # ✅ 变更 1: 使用自定义的 API 路径 (fsp-api/v1/verify-order)
+        # 这绕过了标准的 /wc/v3/ 路径，通常能避开防火墙规则
+        url = f"{base_url}/wp-json/fsp-api/v1/verify-order"
         
-        # ✅ 关键修改策略: 
-        # 不再伪装成浏览器 (User-Agent: Mozilla...)，因为这在 API 调用中反而可疑。
-        # 我们伪装成官方 WooCommerce API 客户端，SiteGround 防火墙通常会放行此类 API 标识。
+        logger.info(f"🔍 Verifying with Custom Endpoint: {url}")
         
-        headers = {
-            "User-Agent": "WooCommerce-API-Client/3.0", 
-            "Content-Type": "application/json",
-            "Accept": "application/json"
+        # ✅ 变更 2: 构造 Payload 和 Header
+        # 使用密钥进行验证，而不是 Basic Auth
+        payload = {
+            'order_id': order_id,
+            'secret': FSP_SECRET_KEY # 备用：放在 Body 里
         }
         
-        # 使用标准 requests 库，设置较长的超时时间
-        resp = requests.get(
+        headers = {
+            "User-Agent": "FSP-Backend-Verifier/2.0", 
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-fsp-secret": FSP_SECRET_KEY # 主要：放在 Header 里
+        }
+        
+        # ✅ 变更 3: 发送 POST 请求
+        resp = requests.post(
             url, 
-            auth=(WOO_CK, WOO_CS),
+            json=payload,
             headers=headers,
             timeout=30,
-            verify=True # 确保开启 SSL 验证
+            verify=True
         )
         
-        # 检查是否仍然被 HTML 内容拦截 (如 SiteGround Captcha)
-        content_type = resp.headers.get('Content-Type', '')
-        if "text/html" in content_type and ("sgcaptcha" in resp.text or "Security Check" in resp.text):
-            logger.error("❌ CRITICAL: Still blocked by SiteGround Security (HTML response received).")
-            # 备用方案: 尝试使用 WordPress 通用标识
-            headers["User-Agent"] = "WordPress/6.4; " + request.host_url
-            resp = requests.get(url, auth=(WOO_CK, WOO_CS), headers=headers, timeout=30)
-
         if resp.status_code != 200:
-            logger.error(f"❌ WooCommerce Error {resp.status_code}: {resp.text[:200]}")
+            logger.error(f"❌ Verification Error {resp.status_code}: {resp.text[:200]}")
             try:
                 err_json = resp.json()
-                msg = err_json.get('message', 'Order not found.')
+                msg = err_json.get('message', 'Order verification failed.')
+                # 兼容 WP_Error 返回的 code/message 结构
+                if 'code' in err_json and 'message' in err_json:
+                    msg = err_json['message']
                 return jsonify({"success": False, "error": msg}), 404
             except:
                 return jsonify({"success": False, "error": "Order verification failed."}), 404
@@ -403,6 +408,10 @@ def verify_purchase():
         except json.JSONDecodeError:
              logger.error(f"❌ Failed to decode JSON. Response was: {resp.text[:200]}")
              return jsonify({"success": False, "error": "Invalid response from store."}), 500
+
+        # PHP 接口返回的结构: { success: true, status: 'completed', ... }
+        if not order_data.get('success'):
+             return jsonify({"success": False, "error": "Invalid Secret or Order ID"}), 403
 
         status = order_data.get('status')
         logger.info(f"✅ Order Status: {status}")
