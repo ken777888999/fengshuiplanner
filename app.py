@@ -31,13 +31,13 @@ logger = logging.getLogger('fengshui_app')
 app = Flask(__name__)
 
 # ============================================================
-# ✅ 修复1: 更严格的 CORS 配置
+# ✅ CORS 配置 (保持不变)
 # ============================================================
 CORS(app, 
      resources={r"/*": {"origins": "*"}},
      methods=["GET", "POST", "OPTIONS"],
      allow_headers=["Content-Type", "X-API-Key", "Authorization"],
-     supports_credentials=False,  # 改为 False，避免冲突
+     supports_credentials=False,
      max_age=3600
 )
 
@@ -54,6 +54,7 @@ else:
     dashscope.api_key = QWEN_API_KEY
     logger.info("✅ API Key 已加载")
 
+# ✅ 产品信息配置
 PRODUCT_URL = "https://fengshuispaceplanner.com/product/personalized-feng-shui-talisman/"
 PRODUCT_NAME = "Personalized Feng Shui Talisman"
 
@@ -68,10 +69,9 @@ if HAS_KB_HANDLER:
 
 
 # ============================================================
-# ✅ 修复2: 手动添加 CORS 头的装饰器
+# ✅ CORS 头装饰器 (保持不变)
 # ============================================================
 def add_cors_headers(response):
-    """确保所有响应都有 CORS 头"""
     response.headers['Access-Control-Allow-Origin'] = '*'
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
     response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
@@ -79,25 +79,10 @@ def add_cors_headers(response):
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
 
-
-def cors_preflight():
-    """处理 OPTIONS 预检请求"""
-    response = make_response()
-    response.headers['Access-Control-Allow-Origin'] = '*'
-    response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
-    response.headers['Access-Control-Max-Age'] = '3600'
-    return response
-
-
 @app.after_request
 def after_request(response):
     return add_cors_headers(response)
 
-
-# ============================================================
-# ✅ 修复3: 显式处理所有 OPTIONS 请求
-# ============================================================
 @app.before_request
 def handle_options():
     if request.method == 'OPTIONS':
@@ -110,27 +95,19 @@ def handle_options():
 
 
 # ============================================================
-# ✅ 新增: 清理 Markdown 包装的函数
+# ✅ 工具函数 (保持不变)
 # ============================================================
 def clean_markdown_wrapper(text):
-    """去掉 AI 返回的 ```markdown 包装"""
-    if not text:
-        return text
-    # 去掉开头的 ```markdown 或 ```
+    if not text: return text
     text = re.sub(r'^```(?:markdown)?\s*\n?', '', text.strip())
-    # 去掉结尾的 ```
     text = re.sub(r'\n?```\s*$', '', text)
     return text.strip()
-
 
 def cleanup_old_reports():
     current_time = time.time()
     expired = [rid for rid, d in reports_db.items() if current_time - d.get('created_at', 0) > 86400]
     for rid in expired:
         del reports_db[rid]
-    if expired:
-        logger.info(f"🧹 已清理 {len(expired)} 份过期报告")
-
 
 def filter_report_for_free_tier(full_text):
     lines = full_text.split('\n')
@@ -140,20 +117,15 @@ def filter_report_for_free_tier(full_text):
     
     for line in lines:
         stripped = line.strip()
-        
         if "## Areas for Improvement" in line:
             found_improvement = True
             output_lines.append(line)
             continue
-        
         if not found_improvement:
             output_lines.append(line)
             continue
         
-        is_list_item = (
-            stripped.startswith(('-', '*')) or 
-            (len(stripped) > 1 and stripped[0].isdigit() and '.' in stripped[:3])
-        )
+        is_list_item = (stripped.startswith(('-', '*')) or (len(stripped) > 1 and stripped[0].isdigit() and '.' in stripped[:3]))
         
         if is_list_item:
             bullet_count += 1
@@ -172,9 +144,7 @@ def filter_report_for_free_tier(full_text):
         "> **Unlock the full report** to see the remaining issues, \n"
         "> detailed **Recommended Changes**, and the **Cure Selection**."
     )
-    
     return "\n".join(output_lines) + paywall
-
 
 def format_grid_data_for_ai(grid_data):
     position_map = {
@@ -188,14 +158,11 @@ def format_grid_data_for_ai(grid_data):
         "8": "South (S) - Fame/Recognition (Li/离)",
         "9": "Southeast (SE) - Wealth Luck (Xun/巽)"
     }
-    
     desc = []
     for pos, cell in grid_data.items():
         items = cell.get('items', []) if isinstance(cell, dict) else (cell if isinstance(cell, list) else [])
         areas = cell.get('areaTypes', []) if isinstance(cell, dict) else []
-        
-        if not items and not areas:
-            continue
+        if not items and not areas: continue
         
         pos_name = position_map.get(str(pos), f"Position {pos}")
         parts = []
@@ -204,45 +171,31 @@ def format_grid_data_for_ai(grid_data):
             parts.append(f"contains {', '.join(readable)}")
         if areas:
             parts.append(f"marked as {', '.join([a.replace('_', ' ').title() for a in areas])} area")
-        
         if parts:
             desc.append(f"- {pos_name}: {' and '.join(parts)}.")
-    
     return "\n".join(desc) if desc else "The room is currently empty."
 
-
 def calculate_kua_number(gender, birth_year):
-    if not gender or not birth_year:
-        return None
+    if not gender or not birth_year: return None
     try:
         year = int(birth_year)
-        
         def reduce(n):
-            while n > 9:
-                n = sum(int(d) for d in str(n))
+            while n > 9: n = sum(int(d) for d in str(n))
             return n if n != 0 else 9
-        
         reduced = reduce(year % 100)
-        
         if gender.lower() == 'male':
             kua = (9 - reduced) if year >= 2000 else (10 - reduced)
             if kua <= 0: kua += 9
             if kua == 10: kua = 1
         else:
             kua = reduce((reduced + 6) if year >= 2000 else (reduced + 5))
-        
         if kua == 0: kua = 9
         if kua == 5: kua = 2 if gender.lower() == 'male' else 8
-        
         return kua
-    except:
-        return None
-
+    except: return None
 
 def get_favorable_directions(kua):
-    if not kua:
-        return {}
-    
+    if not kua: return {}
     data = {
         1: {"favorable": ["Southeast", "East", "South", "North"], "unfavorable": ["Northwest", "West", "Southwest", "Northeast"], "best": "Southeast", "worst": "Southwest"},
         2: {"favorable": ["Northeast", "West", "Northwest", "Southwest"], "unfavorable": ["Southeast", "East", "South", "North"], "best": "Northeast", "worst": "Southeast"},
@@ -253,7 +206,6 @@ def get_favorable_directions(kua):
         8: {"favorable": ["Southwest", "Northwest", "Northeast", "West"], "unfavorable": ["Southeast", "East", "South", "North"], "best": "Southwest", "worst": "East"},
         9: {"favorable": ["East", "South", "North", "Southeast"], "unfavorable": ["West", "Southwest", "Northwest", "Northeast"], "best": "East", "worst": "Northwest"},
     }
-    
     result = data.get(kua, {})
     result["kua"] = kua
     result["group"] = "East" if kua in [1,3,4,9] else "West"
@@ -262,13 +214,11 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.0.1", "cached": len(reports_db)})
-
+    return jsonify({"status": "running", "version": "2.0.2", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
     return jsonify({"status": "ok", "kb": kb_handler is not None})
-
 
 @app.route('/wake', methods=['GET', 'POST', 'OPTIONS'])
 def wake():
@@ -276,7 +226,7 @@ def wake():
 
 
 # ============================================================
-# ✅ 修复4: 优化 analyze-fengshui，使用更短的 prompt
+# ✅ 核心修改处: analyze-fengshui
 # ============================================================
 @app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
 def analyze_fengshui():
@@ -287,7 +237,6 @@ def analyze_fengshui():
         grid_data = data.get('gridData', {})
         is_paid = data.get('isPaid', False)
         
-        # 解析个人信息
         info = data.get('personalInfo', {})
         gender = info.get('gender', '')
         birth_date = info.get('birthDate', '')
@@ -301,22 +250,15 @@ def analyze_fengshui():
         
         kua = calculate_kua_number(gender, birth_year) if gender and birth_year else None
         dirs = get_favorable_directions(kua)
-        
         room_desc = format_grid_data_for_ai(grid_data)
         
-        # 知识库上下文 - 简化
-        kb_context = ""
-        if kb_handler:
-            query = "bedroom feng shui bed position"
-            kb_context = kb_handler.get_relevant_context(query)
-        kb_context = kb_context[:500] if kb_context else "Classical Feng Shui principles apply."
-        
-        # 命卦信息 - 简化
         kua_info = ""
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        # ✅ 更短的 prompt 以加快响应
+        # ---------------------------------------------------------
+        # 👇 这里的 Prompt 经过了微调，严格执行您的营销策略
+        # ---------------------------------------------------------
         prompt = f"""Feng Shui Master analysis for bedroom layout.
 
 Layout: {room_desc}
@@ -333,15 +275,17 @@ Provide in Markdown:
 (3-4 issues with impact)
 
 ## Recommended Changes
-(fixes for each issue)
-Include: [{PRODUCT_NAME}]({PRODUCT_URL}) for {dirs.get('best', 'favorable')} corner.
+IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Number them 1, 2, and 3.
+1. [First specific recommendation based on furniture placement or layout]
+2. [Second specific recommendation based on decor, colors, or elements]
+3. [Third recommendation]: Identify a specific energy blockage in the {dirs.get('best', 'favorable')} sector that cannot be fixed by furniture alone. Prescribe the [{PRODUCT_NAME}]({PRODUCT_URL}) as the essential cure to activate this sector.
 
 ## Special Tips
-(1-2 personalized tips)"""
-        
+(1-2 personalized tips)"""        
+        # ---------------------------------------------------------
+
         logger.info("📝 Calling Qwen API...")
         
-        # ✅ 添加超时控制
         resp = dashscope.Generation.call(
             model='qwen-plus',
             messages=[
@@ -349,12 +293,12 @@ Include: [{PRODUCT_NAME}]({PRODUCT_URL}) for {dirs.get('best', 'favorable')} cor
                 {'role': 'user', 'content': prompt}
             ],
             result_format='message',
-            timeout=25  # 25秒超时
+            timeout=25
         )
         
         if resp.status_code == HTTPStatus.OK:
             full = resp.output.choices[0].message.content
-            full = clean_markdown_wrapper(full)  # ✅ 清理 Markdown 包装
+            full = clean_markdown_wrapper(full)
             report_id = str(uuid.uuid4())
             
             reports_db[report_id] = {
@@ -442,9 +386,8 @@ def get_report(report_id):
         "favorableDirections": r.get('dirs')
     })
 
-
 # ============================================================
-# ✅ 修复5: 添加错误处理器确保 CORS 头
+# ✅ 错误处理 (保持不变)
 # ============================================================
 @app.errorhandler(Exception)
 def handle_exception(e):
@@ -453,20 +396,17 @@ def handle_exception(e):
     response.status_code = 500
     return add_cors_headers(response)
 
-
 @app.errorhandler(404)
 def handle_404(e):
     response = jsonify({"success": False, "error": "Not found"})
     response.status_code = 404
     return add_cors_headers(response)
 
-
 @app.errorhandler(500)
 def handle_500(e):
     response = jsonify({"success": False, "error": "Server error"})
     response.status_code = 500
     return add_cors_headers(response)
-
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
