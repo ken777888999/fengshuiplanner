@@ -268,10 +268,13 @@ def process_layout():
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        # ✅ 核心修改：Prompt 格式调整
-        # 1. 要求 Positive Aspects 和 Areas for Improvement 使用数字列表 (numbered list)
-        # 2. 要求第3点推荐中，产品名称直接作为 Markdown 链接 [{PRODUCT_NAME}]({PRODUCT_URL})
-        # 3. 要求 Special Tips 使用数字列表
+        # ✅ 核心修改：
+        # 1. 预先定义好 Markdown 链接字符串，防止 Prompt 混淆。
+        # 2. 修改 Prompt 结构，不再把指令放在列表项里，而是作为生成规则。
+        
+        product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
+        best_direction = dirs.get('best', 'Southwest')
+
         prompt = f"""Feng Shui Master analysis for bedroom layout.
 
 Layout: {room_desc}
@@ -288,10 +291,15 @@ Provide in Markdown:
 (3-4 issues with impact, use numbered list 1., 2., etc.)
 
 ## Recommended Changes
-IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Number them 1., 2., and 3.
-1. [First specific recommendation based on furniture placement or layout]
-2. [Second specific recommendation based on decor, colors, or elements]
-3. Identify a specific energy blockage in the {dirs.get('best', 'Southwest')} sector that cannot be fixed by furniture alone. Prescribe the [{PRODUCT_NAME}]({PRODUCT_URL}) as the essential cure to activate this sector.
+(Provide exactly THREE distinct recommendations. Number them 1., 2., and 3.)
+
+1. [Write a specific recommendation based on furniture placement or layout]
+2. [Write a specific recommendation based on decor, colors, or elements]
+3. [For this third point, you MUST recommend a specific cure for the {best_direction} sector]. 
+   - State that there is a subtle energy blockage in the {best_direction} sector.
+   - Explicitly recommend the {product_md_link} as the essential cure. 
+   - Ensure the link is clickable and formatted exactly as: {product_md_link}
+   - Do NOT output the instructions, only the recommendation text.
 
 ## Special Tips
 (2 personalized tips, use numbered list 1., 2.)"""        
