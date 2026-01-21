@@ -9,3 +9,4 @@ EbookLib>=0.18
 beautifulsoup4>=4.12.0
 lxml>=4.9.0
 curl_cffi==0.5.10
+cloudscraper
