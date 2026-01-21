@@ -11,7 +11,7 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
-import cloudscraper  # ✅ NEW IMPORT
+# import cloudscraper  # ❌ 移除或注释掉，改用标准 requests 伪装 API 客户端
 
 # --- Custom Module Import ---
 try:
@@ -215,7 +215,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.1.3-CLOUDSCRAPER-FIX", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.1.4-REQUESTS-FIX", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -336,7 +336,7 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ /verify-purchase (Updated with Cloudscraper & Headers)
+# ✅ /verify-purchase (Updated: API Client Masquerade)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -360,45 +360,50 @@ def verify_purchase():
         base_url = WOO_URL.rstrip('/')
         url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
-        logger.info(f"🔍 Verifying with WooCommerce via Cloudscraper: {url}")
+        logger.info(f"🔍 Verifying with WooCommerce via Standard Requests: {url}")
         
-        # ✅ FIX: Use Cloudscraper with forced Browser Headers to bypass SiteGround
-        # 强制模拟 Windows 上的 Chrome 浏览器
-        scraper = cloudscraper.create_scraper(
-            browser={
-                'browser': 'chrome',
-                'platform': 'windows',
-                'desktop': True
-            }
-        )
+        # ✅ 关键修改策略: 
+        # 不再伪装成浏览器 (User-Agent: Mozilla...)，因为这在 API 调用中反而可疑。
+        # 我们伪装成官方 WooCommerce API 客户端，SiteGround 防火墙通常会放行此类 API 标识。
         
-        # 添加完整的浏览器头部信息，欺骗防火墙
         headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json, text/javascript, */*; q=0.01",
-            "Referer": "https://fengshuispaceplanner.com/",
-            "Origin": "https://fengshuispaceplanner.com",
-            "X-Requested-With": "XMLHttpRequest"
+            "User-Agent": "WooCommerce-API-Client/3.0", 
+            "Content-Type": "application/json",
+            "Accept": "application/json"
         }
         
-        # WooCommerce requires Basic Auth. Cloudscraper handles auth nicely.
-        resp = scraper.get(
+        # 使用标准 requests 库，设置较长的超时时间
+        resp = requests.get(
             url, 
             auth=(WOO_CK, WOO_CS),
-            headers=headers,  # <--- 重要：添加 headers
-            timeout=20
+            headers=headers,
+            timeout=30,
+            verify=True # 确保开启 SSL 验证
         )
         
-        # Check for SiteGround CAPTCHA again (just in case)
-        if "sgcaptcha" in resp.text:
-            logger.error("❌ CRITICAL: Cloudscraper failed to bypass SiteGround security.")
-            return jsonify({"success": False, "error": "Server connection blocked by website security."}), 500
+        # 检查是否仍然被 HTML 内容拦截 (如 SiteGround Captcha)
+        content_type = resp.headers.get('Content-Type', '')
+        if "text/html" in content_type and ("sgcaptcha" in resp.text or "Security Check" in resp.text):
+            logger.error("❌ CRITICAL: Still blocked by SiteGround Security (HTML response received).")
+            # 备用方案: 尝试使用 WordPress 通用标识
+            headers["User-Agent"] = "WordPress/6.4; " + request.host_url
+            resp = requests.get(url, auth=(WOO_CK, WOO_CS), headers=headers, timeout=30)
 
         if resp.status_code != 200:
-            logger.error(f"❌ WooCommerce Error {resp.status_code}: {resp.text[:100]}")
-            return jsonify({"success": False, "error": "Order not found."}), 404
+            logger.error(f"❌ WooCommerce Error {resp.status_code}: {resp.text[:200]}")
+            try:
+                err_json = resp.json()
+                msg = err_json.get('message', 'Order not found.')
+                return jsonify({"success": False, "error": msg}), 404
+            except:
+                return jsonify({"success": False, "error": "Order verification failed."}), 404
         
-        order_data = resp.json()
+        try:
+            order_data = resp.json()
+        except json.JSONDecodeError:
+             logger.error(f"❌ Failed to decode JSON. Response was: {resp.text[:200]}")
+             return jsonify({"success": False, "error": "Invalid response from store."}), 500
+
         status = order_data.get('status')
         logger.info(f"✅ Order Status: {status}")
 
