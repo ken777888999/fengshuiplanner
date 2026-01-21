@@ -270,7 +270,8 @@ def process_layout():
         
         # ✅ 核心修改：Prompt 格式调整
         # 1. 要求 Positive Aspects 和 Areas for Improvement 使用数字列表 (numbered list)
-        # 2. 要求第3点推荐中，产品名称加粗并直接作为链接 [**Name**](URL)，不显示 URL 文本
+        # 2. 要求第3点推荐中，产品名称直接作为 Markdown 链接 [{PRODUCT_NAME}]({PRODUCT_URL})
+        # 3. 要求 Special Tips 使用数字列表
         prompt = f"""Feng Shui Master analysis for bedroom layout.
 
 Layout: {room_desc}
@@ -287,13 +288,13 @@ Provide in Markdown:
 (3-4 issues with impact, use numbered list 1., 2., etc.)
 
 ## Recommended Changes
-IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Number them 1, 2, and 3.
+IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Number them 1., 2., and 3.
 1. [First specific recommendation based on furniture placement or layout]
 2. [Second specific recommendation based on decor, colors, or elements]
-3. [Third recommendation]: Identify a specific energy blockage in the {dirs.get('best', 'favorable')} sector that cannot be fixed by furniture alone. Prescribe the [**{PRODUCT_NAME}**]({PRODUCT_URL}) as the essential cure to activate this sector. (Ensure the product name is bold and hyperlinked, do not show the URL separately).
+3. Identify a specific energy blockage in the {dirs.get('best', 'Southwest')} sector that cannot be fixed by furniture alone. Prescribe the [{PRODUCT_NAME}]({PRODUCT_URL}) as the essential cure to activate this sector.
 
 ## Special Tips
-(1-2 personalized tips)"""        
+(2 personalized tips, use numbered list 1., 2.)"""        
 
         logger.info("📝 Calling Qwen API...")
         
