@@ -32,7 +32,7 @@ logger = logging.getLogger('fengshui_app')
 app = Flask(__name__)
 
 # ============================================================
-# ✅ CORS 配置 (保持不变)
+# ✅ CORS 配置
 # ============================================================
 CORS(app, 
      resources={r"/*": {"origins": "*"}},
@@ -70,7 +70,7 @@ if HAS_KB_HANDLER:
 
 
 # ============================================================
-# ✅ CORS 头装饰器 (保持不变)
+# ✅ CORS 头装饰器
 # ============================================================
 def add_cors_headers(response):
     response.headers['Access-Control-Allow-Origin'] = '*'
@@ -215,8 +215,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    # ✅ 修改：更新版本号以便确认部署
-    return jsonify({"status": "running", "version": "2.0.6", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.1.1-FULL", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -226,7 +225,7 @@ def health():
 def wake():
     return jsonify({"status": "awake", "time": time.time()})
 
-# ✅ 新增：调试路由，方便你查看 URL 结构
+# ✅ 保留原有的调试路由
 @app.route('/debug-routes')
 def debug_routes():
     output = []
@@ -237,10 +236,10 @@ def debug_routes():
     return "<br>".join(output)
 
 # ============================================================
-# ✅ analyze-fengshui (保持原样)
+# ✅ 核心修改 1：重命名为 /process-layout (原 analyze-fengshui)
 # ============================================================
-@app.route('/analyze-fengshui', methods=['POST', 'OPTIONS'])
-def analyze_fengshui():
+@app.route('/process-layout', methods=['POST', 'OPTIONS'])
+def process_layout():
     cleanup_old_reports()
     
     try:
@@ -267,9 +266,6 @@ def analyze_fengshui():
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        # ---------------------------------------------------------
-        # 👇 这里的 Prompt 保持原样
-        # ---------------------------------------------------------
         prompt = f"""Feng Shui Master analysis for bedroom layout.
 
 Layout: {room_desc}
@@ -293,7 +289,6 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 ## Special Tips
 (1-2 personalized tips)"""        
-        # ---------------------------------------------------------
 
         logger.info("📝 Calling Qwen API...")
         
@@ -342,10 +337,10 @@ IMPORTANT: Provide exactly THREE (3) distinct, actionable recommendations. Numbe
 
 
 # ============================================================
-# ✅ 修复后的 unlock-report 路由 (解决 SiteGround 拦截问题)
+# ✅ 核心修改 2：重命名为 /verify-purchase (原 unlock-report)
 # ============================================================
-@app.route('/unlock-report', methods=['POST', 'OPTIONS'], strict_slashes=False)
-def unlock_report():
+@app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
+def verify_purchase():
     # 显式处理 OPTIONS 请求
     if request.method == 'OPTIONS':
         return jsonify({"status": "ok"}), 200
@@ -354,24 +349,22 @@ def unlock_report():
     report_id = data.get('reportId')
     order_id = data.get('orderId')
     
-    logger.info(f"🔓 收到解锁请求 (Unlock request received). Report: {report_id}, Order: {order_id}")
+    logger.info(f"🔓 收到验证请求. Report: {report_id}, Order: {order_id}")
 
     if not report_id or report_id not in reports_db:
-        logger.warning(f"❌ 报告未找到 (Report not found): {report_id}")
+        logger.warning(f"❌ 报告未找到: {report_id}")
         return jsonify({"success": False, "error": "Report expired. Please analyze again."}), 404
     
     if not order_id:
-        logger.warning("❌ 缺少订单号 (Missing Order ID)")
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
-        # 去除 WOO_URL 末尾可能多余的斜杠
         base_url = WOO_URL.rstrip('/')
         url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
         logger.info(f"🔍 正在向 WooCommerce 验证: {url}")
         
-        # ✅ 关键修复：伪装成真实浏览器，绕过 SiteGround 的机器人拦截
+        # ✅ 关键修复：伪装成真实浏览器，防止 SiteGround 拦截
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "application/json, text/javascript, */*; q=0.01",
@@ -381,25 +374,22 @@ def unlock_report():
         resp = requests.get(
             url, 
             auth=(WOO_CK, WOO_CS), 
-            headers=headers, # 使用伪装头
+            headers=headers, 
             timeout=15
         )
         
-        # 增加对 SiteGround 验证码页面的特殊检测
         if "sgcaptcha" in resp.text:
-            logger.error("❌ 严重错误: 请求被 SiteGround 安全插件拦截 (Blocked by SiteGround Security).")
-            logger.error("👉 请在 SiteGround 后台将 Render 服务器 IP 添加到白名单，或关闭 'Browser Integrity Check'。")
-            return jsonify({"success": False, "error": "Server connection blocked by website security. Please contact support."}), 500
+            logger.error("❌ 严重错误: 请求被 SiteGround 安全插件拦截。")
+            return jsonify({"success": False, "error": "Server connection blocked by website security."}), 500
 
         if resp.status_code != 200:
-            logger.error(f"❌ WooCommerce 错误 {resp.status_code}: {resp.text[:200]}")
+            logger.error(f"❌ WooCommerce 错误 {resp.status_code}")
             return jsonify({"success": False, "error": "Order not found."}), 404
         
         order_data = resp.json()
         status = order_data.get('status')
         logger.info(f"✅ 订单状态: {status}")
 
-        # 允许 completed (完成) 或 processing (处理中) 的订单解锁
         if status in ['completed', 'processing']:
             r = reports_db[report_id]
             return jsonify({
@@ -413,26 +403,17 @@ def unlock_report():
         else:
             return jsonify({"success": False, "error": f"Order status is '{status}', waiting for completion."}), 400
             
-    except requests.Timeout:
-        logger.error("❌ WooCommerce 连接超时")
-        return jsonify({"success": False, "error": "Verification timed out. Please try again."}), 500
     except Exception as e:
-        logger.error(f"❌ 解锁异常: {str(e)}")
+        logger.error(f"❌ 验证异常: {str(e)}")
         return jsonify({"success": False, "error": str(e)}), 500
 
 
 # ============================================================
-# ✅ 核心修复：get_report 路由
+# ✅ 保留原有的 get-report 路由
 # ============================================================
 @app.route('/get-report/<report_id>', methods=['GET', 'OPTIONS'])
 @app.route('/get-report', methods=['GET', 'OPTIONS'])
 def get_report(report_id=None):
-    """
-    获取报告。
-    支持路径参数: /get-report/123
-    支持查询参数: /get-report?reportId=123 (防止前端传参方式不同导致的 404)
-    """
-    # 如果路径中没有 report_id，尝试从查询参数获取
     if report_id is None:
         report_id = request.args.get('reportId') or request.args.get('id')
 
