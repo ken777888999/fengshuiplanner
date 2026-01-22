@@ -44,7 +44,7 @@ CORS(app,
 
 reports_db = {}
 
-# ✅ WooCommerce 配置 (必须确保这些 Key 在 .env 中正确配置)
+# ✅ WooCommerce 配置
 WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
 WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
@@ -52,7 +52,7 @@ WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 # ✅ 密钥配置
 FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY", "fengshuispaceplannersupergirl")
 
-# ✅ 自定义 API 配置（新增）
+# ✅ 自定义 API 配置
 FSP_API_URL = "https://fengshuispaceplanner.com/wp-json/fsp-api/v1/verify-order"
 FSP_API_SECRET = "fengshuispaceplannersupergirl"
 
@@ -223,7 +223,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.4.0-WOO-API", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.5.0-PROMPT-FIX", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -242,8 +242,9 @@ def debug_routes():
         output.append(line)
     return "<br>".join(output)
 
+
 # ============================================================
-# ✅ /process-layout
+# ✅ /process-layout (已修复 prompt)
 # ============================================================
 @app.route('/process-layout', methods=['POST', 'OPTIONS'])
 def process_layout():
@@ -276,13 +277,19 @@ def process_layout():
         product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
         best_direction = dirs.get('best', 'Southwest')
 
+        # ✅ 产品上下文（与产品页面保持一致，添加限制条款）
         product_context = (
             f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
-            "ORIGIN: Authentic Longhushan (Dragon Tiger Mountain), the birthplace of Zhengyi Taoism (founded 240 CE).\n"
-            "CRAFTSMANSHIP: Crafted by masters with 1500-year Taoist wisdom.\n"
-            "FUNCTION: Specifically corrects energy imbalances in the bedroom to improve sleep quality and harmony.\n"
-            "UNIQUENESS: It is CUSTOM-DESIGNED based on the user's specific bedroom analysis. It is NOT a generic mass-produced item.\n"
+            "SOURCE: Longhushan (Dragon Tiger Mountain), birthplace of Zhengyi Taoism.\n"
+            "DESCRIPTION: Crafted with 1500-year Taoist wisdom, designed to balance bedroom energy.\n"
+            "FUNCTION: Address specific imbalances identified in the bedroom analysis.\n"
             "USAGE: Simple placement, no complex rituals required.\n"
+            "\n"
+            "IMPORTANT RESTRICTIONS - DO NOT USE THESE PHRASES:\n"
+            "- 'exact dimensions calibration' or 'precise measurement'\n"
+            "- 'electronic residue' or 'structural imbalances'\n"
+            "- 'actively stabilizes Qi' or 'hidden energy leaks'\n"
+            "- 'custom-calibrated to your room's exact dimensions and orientation'\n"
         )
 
         prompt = f"""You are a Feng Shui Master. Analyze this bedroom layout.
@@ -291,7 +298,7 @@ User Data:
 - Layout: {room_desc}
 - Personal: {kua_info if kua_info else 'Not provided'}
 
-Product Context (Use this for the recommendation):
+Product Context:
 {product_context}
 
 Task: Provide a Feng Shui report in Markdown. Always address the user directly using "you" and "your".
@@ -311,27 +318,36 @@ Structure:
 
 1. [Write a specific recommendation based on furniture placement or layout]
 2. [Write a specific recommendation based on decor, colors, or elements]
-3. For the {best_direction} sector, write ONE cohesive paragraph recommending the use of a {product_md_link} to harmonize energy. The paragraph must:
-   - Embed the product link naturally in the sentence (e.g., "To fully harmonize this space, place a [Personalized Feng Shui Talisman](url) in the {best_direction} sector.")
-   - Explain that modern bedrooms often have invisible energy stagnation from electronics and construction
-   - Mention it is from Longhushan and custom-calibrated for YOUR specific room
-   - DO NOT put the link on a separate line - it must be part of a sentence
+3. For the {best_direction} sector, consider placing a {product_md_link} to help balance the energy in this area. This talisman, rooted in Longhushan Taoist tradition, is designed to address the specific imbalances identified in your bedroom and works in harmony with your personal energy pattern.
 
 ## Special Tips
 (2 personalized tips, use numbered list 1., 2.)
 
 CRITICAL RULES:
-1. Always use "you" and "your" when addressing the user, NEVER use "they" or "their"
-2. The product link [{PRODUCT_NAME}]({PRODUCT_URL}) must be EMBEDDED within a sentence, NOT on its own line
-3. CORRECT: "Place a [Personalized Feng Shui Talisman]({PRODUCT_URL}) in the West sector to balance your energy."
-4. WRONG: Having the link alone on a separate line"""
+1. Always use "you" and "your" when addressing the user
+2. The product link must be EMBEDDED within a sentence, not on its own line
+3. Product recommendation must be SIMPLE and MODEST
+4. ALLOWED phrases (from product page):
+   - "balance your bedroom's energy"
+   - "address specific imbalances identified in your bedroom"
+   - "works in harmony with your personal energy pattern"
+   - "rooted in Longhushan Taoist tradition"
+   - "no complex rituals required"
+5. FORBIDDEN phrases (do not use):
+   - "exact dimensions and orientation"
+   - "custom-calibrated to your room's precise measurements"
+   - "electronic residue"
+   - "structural imbalances"
+   - "actively stabilizes Qi"
+   - "hidden energy leaks"
+"""
 
         logger.info("📝 Calling Qwen API...")
         
         resp = dashscope.Generation.call(
             model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their".'},
+                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'},
                 {'role': 'user', 'content': prompt}
             ],
             result_format='message',
@@ -373,7 +389,7 @@ CRITICAL RULES:
 
 
 # ============================================================
-# ✅ /verify-purchase (使用自定义 FSP API)
+# ✅ /verify-purchase
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -394,7 +410,6 @@ def verify_purchase():
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
-        # ✅ 调用自定义 FSP API
         logger.info(f"🔍 Calling FSP API for order: {order_id}")
         
         resp = requests.post(
@@ -411,7 +426,6 @@ def verify_purchase():
         logger.info(f"📥 API response status: {resp.status_code}")
         logger.info(f"📥 API response body: {resp.text[:500]}")
         
-        # 检查是否被拦截（返回 HTML 而非 JSON）
         if "<!DOCTYPE" in resp.text or "<html" in resp.text.lower():
             logger.error("❌ API blocked - received HTML instead of JSON")
             return jsonify({
@@ -450,7 +464,6 @@ def verify_purchase():
         
         logger.info(f"✅ Order #{order_id} - Status: {status}, Paid: {is_paid}")
 
-        # 验证订单状态
         if status in ['completed', 'processing'] or is_paid:
             r = reports_db[report_id]
             return jsonify({
@@ -499,6 +512,7 @@ def get_report(report_id=None):
         "favorableDirections": r.get('dirs')
     })
 
+
 # ============================================================
 # ✅ Error Handlers
 # ============================================================
@@ -520,6 +534,7 @@ def handle_500(e):
     response = jsonify({"success": False, "error": "Server error"})
     response.status_code = 500
     return add_cors_headers(response)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
