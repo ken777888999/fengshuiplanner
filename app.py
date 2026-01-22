@@ -11,6 +11,7 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
+from requests.auth import HTTPBasicAuth  # ✅ 新增：用于官方API认证
 
 # --- Custom Module Import ---
 try:
@@ -43,7 +44,7 @@ CORS(app,
 
 reports_db = {}
 
-# WooCommerce 配置
+# ✅ WooCommerce 配置 (必须确保这些 Key 在 .env 中正确配置)
 WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
 WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
@@ -218,7 +219,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.3.1-SG-FIX", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.4.0-WOO-API", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -362,7 +363,7 @@ Structure:
 
 
 # ============================================================
-# ✅ /verify-purchase (FIXED: User-Agent Spoofing)
+# ✅ /verify-purchase (SWITCHED TO OFFICIAL WOO API)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -383,27 +384,27 @@ def verify_purchase():
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
+        # ✅ STRATEGY CHANGE: Use Official WooCommerce API
+        # SiteGround allows standard API calls with Basic Auth more easily than custom endpoints.
         base_url = WOO_URL.rstrip('/')
-        url = f"{base_url}/wp-json/fsp-api/v1/verify-order"
+        url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
         
-        logger.info(f"🔍 Verifying with Custom Endpoint: {url}")
+        logger.info(f"🔍 Verifying with Official API: {url}")
         
-        payload = {
-            'order_id': order_id,
-            'secret': FSP_SECRET_KEY
-        }
-        
-        # ✅ FIX: Spoofing a real browser User-Agent to bypass SiteGround Security
+        # ✅ Headers to look like a legitimate browser/client
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Content-Type": "application/json",
             "Accept": "application/json",
-            "x-fsp-secret": FSP_SECRET_KEY
+            "Referer": "https://fengshuispaceplanner.com/",
+            "Origin": "https://fengshuispaceplanner.com"
         }
         
-        resp = requests.post(
+        # ✅ Use Basic Auth (Standard for WooCommerce)
+        auth = HTTPBasicAuth(WOO_CK, WOO_CS)
+        
+        resp = requests.get(
             url, 
-            json=payload,
+            auth=auth,
             headers=headers,
             timeout=30,
             verify=True
@@ -414,16 +415,12 @@ def verify_purchase():
             logger.error("❌ SiteGround Security Blocked Request (Captcha)")
             return jsonify({"success": False, "error": "Server security blocked verification. Please contact support."}), 403
 
+        if resp.status_code == 404:
+            return jsonify({"success": False, "error": "Order ID not found."}), 404
+
         if resp.status_code != 200:
             logger.error(f"❌ Verification Error {resp.status_code}: {resp.text[:200]}")
-            try:
-                err_json = resp.json()
-                msg = err_json.get('message', 'Order verification failed.')
-                if 'code' in err_json and 'message' in err_json:
-                    msg = err_json['message']
-                return jsonify({"success": False, "error": msg}), 404
-            except:
-                return jsonify({"success": False, "error": "Order verification failed."}), 404
+            return jsonify({"success": False, "error": f"Error verifying order: {resp.status_code}"}), resp.status_code
         
         try:
             order_data = resp.json()
@@ -431,9 +428,7 @@ def verify_purchase():
              logger.error(f"❌ Failed to decode JSON. Response was: {resp.text[:200]}")
              return jsonify({"success": False, "error": "Invalid response from store."}), 500
 
-        if not order_data.get('success'):
-             return jsonify({"success": False, "error": "Invalid Secret or Order ID"}), 403
-
+        # ✅ Check Order Status
         status = order_data.get('status')
         logger.info(f"✅ Order Status: {status}")
 
