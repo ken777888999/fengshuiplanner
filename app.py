@@ -396,7 +396,8 @@ def verify_purchase():
             json={"order_id": order_id},
             headers={
                 "Content-Type": "application/json",
-                "x-fsp-secret": FSP_API_SECRET
+                "x-fsp-secret": FSP_API_SECRET,
+                "User-Agent": "FSP-Payment-Verification/1.0 (Render.com; +https://fengshuispaceplanner.com)"
             },
             timeout=15
         )
