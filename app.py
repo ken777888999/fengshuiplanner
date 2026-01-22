@@ -238,7 +238,7 @@ def debug_routes():
     return "<br>".join(output)
 
 # ============================================================
-# ✅ /process-layout
+# ✅ /process-layout (MODIFIED: Injected Product Context)
 # ============================================================
 @app.route('/process-layout', methods=['POST', 'OPTIONS'])
 def process_layout():
@@ -268,21 +268,34 @@ def process_layout():
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
         
-        # ✅ 核心修改：
-        # 1. 预先定义好 Markdown 链接字符串，防止 Prompt 混淆。
-        # 2. 修改 Prompt 结构，不再把指令放在列表项里，而是作为生成规则。
-        
         product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
         best_direction = dirs.get('best', 'Southwest')
 
-        prompt = f"""Feng Shui Master analysis for bedroom layout.
+        # ✅ NEW: Injecting specific product context from the provided URL
+        product_context = (
+            f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
+            "ORIGIN: Authentic Longhushan (Dragon Tiger Mountain), the birthplace of Zhengyi Taoism (founded 240 CE).\n"
+            "CRAFTSMANSHIP: Crafted by masters with 1500-year Taoist wisdom.\n"
+            "FUNCTION: Specifically corrects energy imbalances in the bedroom to improve sleep quality and harmony.\n"
+            "UNIQUENESS: It is CUSTOM-DESIGNED based on the user's specific bedroom analysis. It is NOT a generic mass-produced item.\n"
+            "USAGE: Simple placement, no complex rituals required.\n"
+        )
 
-Layout: {room_desc}
-{f'Personal: {kua_info}' if kua_info else ''}
+        # ✅ UPDATED PROMPT: Uses the context above
+        prompt = f"""You are a Feng Shui Master. Analyze this bedroom layout.
 
-Provide in Markdown:
+User Data:
+- Layout: {room_desc}
+- Personal: {kua_info if kua_info else 'Not provided'}
+
+Product Context (Use this for the recommendation):
+{product_context}
+
+Task: Provide a Feng Shui report in Markdown.
+
+Structure:
 ## Overall Energy Assessment
-(2 sentences)
+(2 sentences summarizing the flow of Qi)
 
 ## Positive Aspects  
 (2-3 points, use numbered list 1., 2., etc.)
@@ -296,10 +309,10 @@ Provide in Markdown:
 1. [Write a specific recommendation based on furniture placement or layout]
 2. [Write a specific recommendation based on decor, colors, or elements]
 3. [For this third point, you MUST recommend a specific cure for the {best_direction} sector]. 
-   - State that there is a subtle energy blockage in the {best_direction} sector.
-   - Explicitly recommend the {product_md_link} as the essential cure. 
-   - Ensure the link is clickable and formatted exactly as: {product_md_link}
-   - Do NOT output the instructions, only the recommendation text.
+   - Explain that while their direction is important, modern bedrooms often have invisible energy stagnation.
+   - State that to fully harmonize this specific space, they need the **{PRODUCT_NAME}**.
+   - Emphasize it is from **Longhushan** and **custom-calibrated** for *their* room.
+   - **MANDATORY**: End this section with this exact link: {product_md_link}
 
 ## Special Tips
 (2 personalized tips, use numbered list 1., 2.)"""        
