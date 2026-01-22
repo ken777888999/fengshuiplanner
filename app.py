@@ -11,7 +11,7 @@ from flask import Flask, request, jsonify, make_response, Response
 from flask_cors import CORS 
 from dotenv import load_dotenv
 import dashscope
-from requests.auth import HTTPBasicAuth  # ✅ 新增：用于官方API认证
+from requests.auth import HTTPBasicAuth
 
 # --- Custom Module Import ---
 try:
@@ -51,6 +51,10 @@ WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
 # ✅ 密钥配置
 FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY", "fengshuispaceplannersupergirl")
+
+# ✅ 自定义 API 配置（新增）
+FSP_API_URL = "https://fengshuispaceplanner.com/wp-json/fsp-api/v1/verify-order"
+FSP_API_SECRET = "fengshuispaceplannersupergirl"
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
@@ -363,7 +367,7 @@ Structure:
 
 
 # ============================================================
-# ✅ /verify-purchase (SWITCHED TO OFFICIAL WOO API)
+# ✅ /verify-purchase (使用自定义 FSP API)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -384,55 +388,63 @@ def verify_purchase():
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
     
     try:
-        # ✅ STRATEGY CHANGE: Use Official WooCommerce API
-        # SiteGround allows standard API calls with Basic Auth more easily than custom endpoints.
-        base_url = WOO_URL.rstrip('/')
-        url = f"{base_url}/wp-json/wc/v3/orders/{order_id}"
+        # ✅ 调用自定义 FSP API
+        logger.info(f"🔍 Calling FSP API for order: {order_id}")
         
-        logger.info(f"🔍 Verifying with Official API: {url}")
-        
-        # ✅ Headers to look like a legitimate browser/client
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Referer": "https://fengshuispaceplanner.com/",
-            "Origin": "https://fengshuispaceplanner.com"
-        }
-        
-        # ✅ Use Basic Auth (Standard for WooCommerce)
-        auth = HTTPBasicAuth(WOO_CK, WOO_CS)
-        
-        resp = requests.get(
-            url, 
-            auth=auth,
-            headers=headers,
-            timeout=30,
-            verify=True
+        resp = requests.post(
+            FSP_API_URL,
+            json={"order_id": order_id},
+            headers={
+                "Content-Type": "application/json",
+                "x-fsp-secret": FSP_API_SECRET
+            },
+            timeout=15
         )
         
-        # Check for SiteGround Captcha Interception
-        if "sgcaptcha" in resp.text:
-            logger.error("❌ SiteGround Security Blocked Request (Captcha)")
-            return jsonify({"success": False, "error": "Server security blocked verification. Please contact support."}), 403
-
+        logger.info(f"📥 API response status: {resp.status_code}")
+        logger.info(f"📥 API response body: {resp.text[:500]}")
+        
+        # 检查是否被拦截（返回 HTML 而非 JSON）
+        if "<!DOCTYPE" in resp.text or "<html" in resp.text.lower():
+            logger.error("❌ API blocked - received HTML instead of JSON")
+            return jsonify({
+                "success": False, 
+                "error": "Verification service temporarily unavailable. Please try again."
+            }), 503
+        
         if resp.status_code == 404:
             return jsonify({"success": False, "error": "Order ID not found."}), 404
-
+            
+        if resp.status_code == 403:
+            logger.error("❌ API secret mismatch")
+            return jsonify({"success": False, "error": "Verification failed."}), 500
+        
         if resp.status_code != 200:
-            logger.error(f"❌ Verification Error {resp.status_code}: {resp.text[:200]}")
-            return jsonify({"success": False, "error": f"Error verifying order: {resp.status_code}"}), resp.status_code
+            return jsonify({
+                "success": False, 
+                "error": f"Verification error: {resp.status_code}"
+            }), resp.status_code
         
         try:
-            order_data = resp.json()
+            result = resp.json()
         except json.JSONDecodeError:
-             logger.error(f"❌ Failed to decode JSON. Response was: {resp.text[:200]}")
-             return jsonify({"success": False, "error": "Invalid response from store."}), 500
+            logger.error(f"❌ Invalid JSON: {resp.text[:200]}")
+            return jsonify({
+                "success": False, 
+                "error": "Invalid response from verification server"
+            }), 500
+        
+        if not result.get('success'):
+            error_msg = result.get('message', 'Unknown error')
+            return jsonify({"success": False, "error": error_msg}), 400
 
-        # ✅ Check Order Status
-        status = order_data.get('status')
-        logger.info(f"✅ Order Status: {status}")
+        status = result.get('status')
+        is_paid = result.get('is_paid', False)
+        
+        logger.info(f"✅ Order #{order_id} - Status: {status}, Paid: {is_paid}")
 
-        if status in ['completed', 'processing']:
+        # 验证订单状态
+        if status in ['completed', 'processing'] or is_paid:
             r = reports_db[report_id]
             return jsonify({
                 "success": True,
@@ -443,10 +455,16 @@ def verify_purchase():
                 "favorableDirections": r.get('dirs')
             })
         else:
-            return jsonify({"success": False, "error": f"Order status is '{status}', waiting for completion."}), 400
+            return jsonify({
+                "success": False, 
+                "error": f"Order status is '{status}'. Please complete payment first."
+            }), 400
             
+    except requests.exceptions.Timeout:
+        logger.error("❌ API timeout")
+        return jsonify({"success": False, "error": "Verification timeout. Please try again."}), 504
     except Exception as e:
-        logger.error(f"❌ Verify Exception: {str(e)}")
+        logger.error(f"❌ Verify Exception: {str(e)}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
 
 
