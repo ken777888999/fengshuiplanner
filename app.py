@@ -218,7 +218,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.3.0-FORMAT-FIX", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "2.3.1-SG-FIX", "cached": len(reports_db)})
 
 @app.route('/health')
 def health():
@@ -238,7 +238,7 @@ def debug_routes():
     return "<br>".join(output)
 
 # ============================================================
-# ✅ /process-layout (MODIFIED: Injected Product Context)
+# ✅ /process-layout
 # ============================================================
 @app.route('/process-layout', methods=['POST', 'OPTIONS'])
 def process_layout():
@@ -271,7 +271,6 @@ def process_layout():
         product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
         best_direction = dirs.get('best', 'Southwest')
 
-        # ✅ NEW: Injecting specific product context from the provided URL
         product_context = (
             f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
             "ORIGIN: Authentic Longhushan (Dragon Tiger Mountain), the birthplace of Zhengyi Taoism (founded 240 CE).\n"
@@ -281,7 +280,6 @@ def process_layout():
             "USAGE: Simple placement, no complex rituals required.\n"
         )
 
-        # ✅ UPDATED PROMPT: Uses the context above
         prompt = f"""You are a Feng Shui Master. Analyze this bedroom layout.
 
 User Data:
@@ -364,7 +362,7 @@ Structure:
 
 
 # ============================================================
-# ✅ /verify-purchase (UPDATED: Custom WP Endpoint)
+# ✅ /verify-purchase (FIXED: User-Agent Spoofing)
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
 def verify_purchase():
@@ -386,8 +384,6 @@ def verify_purchase():
     
     try:
         base_url = WOO_URL.rstrip('/')
-        
-        # 使用自定义的 API 路径
         url = f"{base_url}/wp-json/fsp-api/v1/verify-order"
         
         logger.info(f"🔍 Verifying with Custom Endpoint: {url}")
@@ -397,8 +393,9 @@ def verify_purchase():
             'secret': FSP_SECRET_KEY
         }
         
+        # ✅ FIX: Spoofing a real browser User-Agent to bypass SiteGround Security
         headers = {
-            "User-Agent": "FSP-Backend-Verifier/2.0", 
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Content-Type": "application/json",
             "Accept": "application/json",
             "x-fsp-secret": FSP_SECRET_KEY
@@ -412,6 +409,11 @@ def verify_purchase():
             verify=True
         )
         
+        # Check for SiteGround Captcha Interception
+        if "sgcaptcha" in resp.text:
+            logger.error("❌ SiteGround Security Blocked Request (Captcha)")
+            return jsonify({"success": False, "error": "Server security blocked verification. Please contact support."}), 403
+
         if resp.status_code != 200:
             logger.error(f"❌ Verification Error {resp.status_code}: {resp.text[:200]}")
             try:
