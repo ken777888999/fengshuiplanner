@@ -294,7 +294,7 @@ User Data:
 Product Context (Use this for the recommendation):
 {product_context}
 
-Task: Provide a Feng Shui report in Markdown.
+Task: Provide a Feng Shui report in Markdown. Always address the user directly using "you" and "your".
 
 Structure:
 ## Overall Energy Assessment
@@ -311,21 +311,27 @@ Structure:
 
 1. [Write a specific recommendation based on furniture placement or layout]
 2. [Write a specific recommendation based on decor, colors, or elements]
-3. [For this third point, you MUST recommend a specific cure for the {best_direction} sector]. 
-   - Explain that while their direction is important, modern bedrooms often have invisible energy stagnation.
-   - State that to fully harmonize this specific space, they need the **{PRODUCT_NAME}**.
-   - Emphasize it is from **Longhushan** and **custom-calibrated** for *their* room.
-   - **MANDATORY**: End this section with this exact link: {product_md_link}
+3. For the {best_direction} sector, write ONE cohesive paragraph recommending the use of a {product_md_link} to harmonize energy. The paragraph must:
+   - Embed the product link naturally in the sentence (e.g., "To fully harmonize this space, place a [Personalized Feng Shui Talisman](url) in the {best_direction} sector.")
+   - Explain that modern bedrooms often have invisible energy stagnation from electronics and construction
+   - Mention it is from Longhushan and custom-calibrated for YOUR specific room
+   - DO NOT put the link on a separate line - it must be part of a sentence
 
 ## Special Tips
-(2 personalized tips, use numbered list 1., 2.)"""        
+(2 personalized tips, use numbered list 1., 2.)
+
+CRITICAL RULES:
+1. Always use "you" and "your" when addressing the user, NEVER use "they" or "their"
+2. The product link [{PRODUCT_NAME}]({PRODUCT_URL}) must be EMBEDDED within a sentence, NOT on its own line
+3. CORRECT: "Place a [Personalized Feng Shui Talisman]({PRODUCT_URL}) in the West sector to balance your energy."
+4. WRONG: Having the link alone on a separate line"""
 
         logger.info("📝 Calling Qwen API...")
         
         resp = dashscope.Generation.call(
             model='qwen-plus',
             messages=[
-                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks.'},
+                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their".'},
                 {'role': 'user', 'content': prompt}
             ],
             result_format='message',
