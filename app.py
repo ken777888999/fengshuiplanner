@@ -345,7 +345,7 @@ CRITICAL RULES:
         logger.info("📝 Calling Qwen API...")
         
         resp = dashscope.Generation.call(
-            model='qwen-plus',
+            model='qwen3.5-plus',
             messages=[
                 {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'},
                 {'role': 'user', 'content': prompt}
@@ -540,3 +540,4 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🚀 Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
+
