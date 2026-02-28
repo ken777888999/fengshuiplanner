@@ -344,35 +344,19 @@ CRITICAL RULES:
 
         logger.info("📝 Calling Qwen API...")
         
-        resp = dashscope.MultiModalConversation.call(
+        resp = dashscope.Generation.call(
             model='qwen3.5-plus',
-            api_key=QWEN_API_KEY,
             messages=[
-                {
-                    'role': 'system', 
-                    'content': [{
-                        'text': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'
-                    }]
-                },
-                {'role': 'user', 'content': [{'text': prompt}]}
+                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'},
+                {'role': 'user', 'content': prompt}
             ],
             result_format='message',
             timeout=25
         )
         
         if resp.status_code == HTTPStatus.OK:
-    resp_content = resp.output.choices[0].message.content
-    if isinstance(resp_content, list) and len(resp_content) > 0:
-                if 'text' in resp_content[0]:
-full = resp_content[0]['text']
-        else:
-            full = str(resp_content)
-    elif isinstance(resp_content, str):
-    full = resp_content
-    else:
-        full = str(resp_content)
-        full = clean_markdown_wrapper(full)
-        
+            full = resp.output.choices[0].message.content
+            full = clean_markdown_wrapper(full)
             report_id = str(uuid.uuid4())
             
             reports_db[report_id] = {
@@ -556,8 +540,3 @@ if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
     logger.info(f"🚀 Starting on port {port}")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
-
-
-
-
-
