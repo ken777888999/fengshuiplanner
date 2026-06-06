@@ -6,9 +6,13 @@ import uuid
 import time
 import re
 import urllib.parse
+import sqlite3
+import threading
 from http import HTTPStatus
 from flask import Flask, request, jsonify, make_response, Response
-from flask_cors import CORS 
+from flask_cors import CORS
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 from dotenv import load_dotenv
 import dashscope
 from requests.auth import HTTPBasicAuth
@@ -32,33 +36,96 @@ logger = logging.getLogger('fengshui_app')
 app = Flask(__name__)
 
 # ============================================================
+# ✅ Rate Limiting
+# ============================================================
+limiter = Limiter(
+    app=app,
+    key_func=get_remote_address,
+    default_limits=["60 per minute"],
+    storage_uri="memory://"
+)
+
+# ============================================================
 # ✅ CORS Configuration
 # ============================================================
-CORS(app, 
-     resources={r"/*": {"origins": "*"}},
+ALLOWED_ORIGINS = [
+    "https://fengshuispaceplanner.com",
+    "https://www.fengshuispaceplanner.com",
+    "http://localhost",  # 本地开发
+]
+
+CORS(app,
+     resources={r"/*": {"origins": ALLOWED_ORIGINS}},
      methods=["GET", "POST", "OPTIONS"],
-     allow_headers=["Content-Type", "X-API-Key", "Authorization"],
+     allow_headers=["Content-Type"],
      supports_credentials=False,
      max_age=3600
 )
 
-reports_db = {}
+# ============================================================
+# ✅ SQLite Persistence (替代内存字典)
+# ============================================================
+DB_PATH = os.getenv("REPORTS_DB_PATH", "reports.db")
 
-# ✅ WooCommerce 配置
-WOO_CK = os.getenv("WOO_CK", "ck_1164e779c5af0df880fbf3fb3ddd38a808dc0e56")
-WOO_CS = os.getenv("WOO_CS", "cs_cce2d28d979f992aa9a9a8183f79dd3c8ba76612")
+db_conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+db_lock = threading.Lock()
+
+db_conn.execute('''CREATE TABLE IF NOT EXISTS reports (
+    id TEXT PRIMARY KEY,
+    full_content TEXT NOT NULL,
+    created_at REAL NOT NULL,
+    kua INTEGER,
+    dirs TEXT,
+    grid TEXT
+)''')
+db_conn.commit()
+
+def save_report(report_id, full_content, kua, dirs, grid):
+    with db_lock:
+        db_conn.execute(
+            "INSERT INTO reports (id, full_content, created_at, kua, dirs, grid) VALUES (?, ?, ?, ?, ?, ?)",
+            (report_id, full_content, time.time(), kua, json.dumps(dirs) if dirs else None, json.dumps(grid) if grid else None)
+        )
+        db_conn.commit()
+
+def load_report(report_id):
+    with db_lock:
+        row = db_conn.execute("SELECT full_content, created_at, kua, dirs, grid FROM reports WHERE id=?", (report_id,)).fetchone()
+    if not row:
+        return None
+    return {
+        "full_content": row[0],
+        "created_at": row[1],
+        "kua": row[2],
+        "dirs": json.loads(row[3]) if row[3] else None,
+        "grid": json.loads(row[4]) if row[4] else None
+    }
+
+def cleanup_old_reports():
+    cutoff = time.time() - 86400
+    with db_lock:
+        db_conn.execute("DELETE FROM reports WHERE created_at < ?", (cutoff,))
+        db_conn.commit()
+
+# ============================================================
+# ✅ 密钥配置（无 fallback，缺失报错）
+# ============================================================
+WOO_CK = os.getenv("WOO_CK")
+WOO_CS = os.getenv("WOO_CS")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
-# ✅ 密钥配置
-FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY", "fengshuispaceplannersupergirl")
+FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY")
+if not FSP_SECRET_KEY:
+    logger.warning("⚠️ FSP_SECRET_KEY not set - order verification will fail")
 
-# ✅ 自定义 API 配置
 FSP_API_URL = "https://fengshuispaceplanner.com/wp-json/fsp-api/v1/verify-order"
-FSP_API_SECRET = "fengshuispaceplannersupergirl"
+FSP_API_SECRET = os.getenv("FSP_API_SECRET")
+if not FSP_API_SECRET:
+    logger.warning("⚠️ FSP_API_SECRET not set - order verification will fail")
 
 QWEN_API_KEY = os.getenv("QWEN_API_KEY") or os.getenv("DASHSCOPE_API_KEY")
 if not QWEN_API_KEY:
-    logger.error("⚠️ API Key not detected")
+    logger.error("⚠️ QWEN_API_KEY not configured - analysis will fail")
 else:
     dashscope.api_key = QWEN_API_KEY
     logger.info("✅ API Key loaded")
@@ -81,9 +148,13 @@ if HAS_KB_HANDLER:
 # ✅ CORS Headers Decorator
 # ============================================================
 def add_cors_headers(response):
-    response.headers['Access-Control-Allow-Origin'] = '*'
+    origin = request.headers.get('Origin', '')
+    if origin in ALLOWED_ORIGINS:
+        response.headers['Access-Control-Allow-Origin'] = origin
+    else:
+        response.headers['Access-Control-Allow-Origin'] = ALLOWED_ORIGINS[0]
     response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-    response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+    response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
     response.headers['Access-Control-Max-Age'] = '3600'
     response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
     return response
@@ -96,9 +167,11 @@ def after_request(response):
 def handle_options():
     if request.method == 'OPTIONS':
         response = make_response()
-        response.headers['Access-Control-Allow-Origin'] = '*'
+        origin = request.headers.get('Origin', '')
+        if origin in ALLOWED_ORIGINS:
+            response.headers['Access-Control-Allow-Origin'] = origin
         response.headers['Access-Control-Allow-Methods'] = 'GET, POST, OPTIONS'
-        response.headers['Access-Control-Allow-Headers'] = 'Content-Type, X-API-Key, Authorization'
+        response.headers['Access-Control-Allow-Headers'] = 'Content-Type'
         response.headers['Access-Control-Max-Age'] = '3600'
         return response
 
@@ -112,18 +185,12 @@ def clean_markdown_wrapper(text):
     text = re.sub(r'\n?```\s*$', '', text)
     return text.strip()
 
-def cleanup_old_reports():
-    current_time = time.time()
-    expired = [rid for rid, d in reports_db.items() if current_time - d.get('created_at', 0) > 86400]
-    for rid in expired:
-        del reports_db[rid]
-
 def filter_report_for_free_tier(full_text):
     lines = full_text.split('\n')
     output_lines = []
     found_improvement = False
     bullet_count = 0
-    
+
     for line in lines:
         stripped = line.strip()
         if "## Areas for Improvement" in line:
@@ -133,9 +200,9 @@ def filter_report_for_free_tier(full_text):
         if not found_improvement:
             output_lines.append(line)
             continue
-        
+
         is_list_item = (stripped.startswith(('-', '*')) or (len(stripped) > 1 and stripped[0].isdigit() and '.' in stripped[:3]))
-        
+
         if is_list_item:
             bullet_count += 1
             if bullet_count == 1:
@@ -155,6 +222,27 @@ def filter_report_for_free_tier(full_text):
     )
     return "\n".join(output_lines) + paywall
 
+# ✅ 输入清洗：只允许合法的家具类型和区域类型
+ALLOWED_ITEMS = {'bed', 'door', 'window', 'mirror', 'device', 'sofa', 'table', 'plant'}
+ALLOWED_AREAS = {'private', 'public', 'work', 'entertain'}
+ALLOWED_POSITIONS = set(str(i) for i in range(1, 10))
+
+def sanitize_grid_data(grid_data):
+    """清洗前端传入的 gridData，防止 prompt 注入"""
+    if not isinstance(grid_data, dict):
+        return {}
+    clean = {}
+    for pos, cell in grid_data.items():
+        if str(pos) not in ALLOWED_POSITIONS:
+            continue
+        if not isinstance(cell, dict):
+            continue
+        items = [i for i in cell.get('items', []) if i in ALLOWED_ITEMS]
+        areas = [a for a in cell.get('areaTypes', []) if a in ALLOWED_AREAS]
+        if items or areas:
+            clean[str(pos)] = {'items': items, 'areaTypes': areas}
+    return clean
+
 def format_grid_data_for_ai(grid_data):
     position_map = {
         "1": "Northwest (NW) - Mentor Luck (Qian/乾)",
@@ -172,7 +260,7 @@ def format_grid_data_for_ai(grid_data):
         items = cell.get('items', []) if isinstance(cell, dict) else (cell if isinstance(cell, list) else [])
         areas = cell.get('areaTypes', []) if isinstance(cell, dict) else []
         if not items and not areas: continue
-        
+
         pos_name = position_map.get(str(pos), f"Position {pos}")
         parts = []
         if items:
@@ -201,7 +289,9 @@ def calculate_kua_number(gender, birth_year):
         if kua == 0: kua = 9
         if kua == 5: kua = 2 if gender.lower() == 'male' else 8
         return kua
-    except: return None
+    except (ValueError, TypeError) as e:
+        logger.warning(f"Kua calculation failed: {e}")
+        return None
 
 def get_favorable_directions(kua):
     if not kua: return {}
@@ -223,7 +313,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "2.5.0-PROMPT-FIX", "cached": len(reports_db)})
+    return jsonify({"status": "running", "version": "3.0.0-hardened", "db": "sqlite"})
 
 @app.route('/health')
 def health():
@@ -244,40 +334,41 @@ def debug_routes():
 
 
 # ============================================================
-# ✅ /process-layout (已修复 prompt)
+# ✅ /process-layout (已修复缩进 + 输入清洗)
 # ============================================================
 @app.route('/process-layout', methods=['POST', 'OPTIONS'])
+@limiter.limit("5 per minute")
 def process_layout():
     cleanup_old_reports()
-    
+
     try:
         data = request.json or {}
-        grid_data = data.get('gridData', {})
+        grid_data = sanitize_grid_data(data.get('gridData', {}))  # ✅ 清洗输入
         is_paid = data.get('isPaid', False)
-        
+
         info = data.get('personalInfo', {})
         gender = info.get('gender', '')
         birth_date = info.get('birthDate', '')
-        
+
         birth_year = ''
         if birth_date:
             for sep in ['-', '/']:
                 if sep in birth_date:
                     birth_year = birth_date.split(sep)[0]
                     break
-        
+
         kua = calculate_kua_number(gender, birth_year) if gender and birth_year else None
         dirs = get_favorable_directions(kua)
         room_desc = format_grid_data_for_ai(grid_data)
-        
+
         kua_info = ""
         if kua and dirs:
             kua_info = f"Kua {kua}, Best: {dirs.get('best')}, Avoid: {dirs.get('worst')}"
-        
+
         product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
         best_direction = dirs.get('best', 'Southwest')
 
-        # ✅ 产品上下文（与产品页面保持一致，添加限制条款）
+        # ✅ 产品上下文
         product_context = (
             f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
             "SOURCE: Longhushan (Dragon Tiger Mountain), birthplace of Zhengyi Taoism.\n"
@@ -307,7 +398,7 @@ Structure:
 ## Overall Energy Assessment
 (2 sentences summarizing the flow of Qi)
 
-## Positive Aspects  
+## Positive Aspects
 (2-3 points, use numbered list 1., 2., etc.)
 
 ## Areas for Improvement
@@ -343,34 +434,47 @@ CRITICAL RULES:
 """
 
         logger.info("📝 Calling Qwen API...")
-        
-        resp = dashscope.Generation.call(
-            model='qwen-plus',
+
+        resp = dashscope.MultiModalConversation.call(
+            model='qwen3.5-plus',
+            api_key=QWEN_API_KEY,
             messages=[
-                {'role': 'system', 'content': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'},
-                {'role': 'user', 'content': prompt}
+                {
+                    'role': 'system',
+                    'content': [{
+                        'text': 'Expert Feng Shui consultant. Concise, professional responses. Output plain Markdown directly without wrapping in code blocks. Always address the user as "you/your", never "they/their". Keep product recommendations simple and aligned with the product page - do not exaggerate claims.'
+                    }]
+                },
+                {'role': 'user', 'content': [{'text': prompt}]}
             ],
             result_format='message',
             timeout=25
         )
-        
+
+        # ✅ 修复：正确的缩进
         if resp.status_code == HTTPStatus.OK:
-            full = resp.output.choices[0].message.content
+            resp_content = resp.output.choices[0].message.content
+            if isinstance(resp_content, list) and len(resp_content) > 0:
+                if 'text' in resp_content[0]:
+                    full = resp_content[0]['text']
+                else:
+                    full = str(resp_content)
+            elif isinstance(resp_content, str):
+                full = resp_content
+            else:
+                full = str(resp_content)
+
             full = clean_markdown_wrapper(full)
+
             report_id = str(uuid.uuid4())
-            
-            reports_db[report_id] = {
-                "full_content": full,
-                "created_at": time.time(),
-                "kua": kua,
-                "dirs": dirs,
-                "grid": grid_data
-            }
-            
+
+            # ✅ SQLite 持久化
+            save_report(report_id, full, kua, dirs, grid_data)
+
             content = full if is_paid else filter_report_for_free_tier(full)
-            
+
             logger.info(f"✅ Report generated: {report_id[:8]}...")
-            
+
             return jsonify({
                 "success": True,
                 "reportId": report_id,
@@ -382,7 +486,7 @@ CRITICAL RULES:
         else:
             logger.error(f"❌ Qwen API error: {resp.message}")
             return jsonify({"success": False, "error": resp.message}), 500
-            
+
     except Exception as e:
         logger.error(f"❌ Error: {e}", exc_info=True)
         return jsonify({"success": False, "error": str(e)}), 500
@@ -392,6 +496,7 @@ CRITICAL RULES:
 # ✅ /verify-purchase
 # ============================================================
 @app.route('/verify-purchase', methods=['POST', 'OPTIONS'])
+@limiter.limit("10 per minute")
 def verify_purchase():
     if request.method == 'OPTIONS':
         return jsonify({"status": "ok"}), 200
@@ -399,19 +504,25 @@ def verify_purchase():
     data = request.json or {}
     report_id = data.get('reportId')
     order_id = data.get('orderId')
-    
+
     logger.info(f"🔓 Verify Request. Report: {report_id}, Order: {order_id}")
 
-    if not report_id or report_id not in reports_db:
+    # ✅ SQLite 查询
+    report = load_report(report_id) if report_id else None
+    if not report:
         logger.warning(f"❌ Report not found: {report_id}")
         return jsonify({"success": False, "error": "Report expired. Please analyze again."}), 404
-    
+
     if not order_id:
         return jsonify({"success": False, "error": "Please enter Order ID."}), 400
-    
+
+    if not FSP_API_SECRET:
+        logger.error("❌ FSP_API_SECRET not configured")
+        return jsonify({"success": False, "error": "Verification service not configured."}), 500
+
     try:
         logger.info(f"🔍 Calling FSP API for order: {order_id}")
-        
+
         resp = requests.post(
             FSP_API_URL,
             json={"order_id": order_id},
@@ -422,64 +533,63 @@ def verify_purchase():
             },
             timeout=15
         )
-        
+
         logger.info(f"📥 API response status: {resp.status_code}")
         logger.info(f"📥 API response body: {resp.text[:500]}")
-        
+
         if "<!DOCTYPE" in resp.text or "<html" in resp.text.lower():
             logger.error("❌ API blocked - received HTML instead of JSON")
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": "Verification service temporarily unavailable. Please try again."
             }), 503
-        
+
         if resp.status_code == 404:
             return jsonify({"success": False, "error": "Order ID not found."}), 404
-            
+
         if resp.status_code == 403:
             logger.error("❌ API secret mismatch")
             return jsonify({"success": False, "error": "Verification failed."}), 500
-        
+
         if resp.status_code != 200:
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": f"Verification error: {resp.status_code}"
             }), resp.status_code
-        
+
         try:
             result = resp.json()
         except json.JSONDecodeError:
             logger.error(f"❌ Invalid JSON: {resp.text[:200]}")
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": "Invalid response from verification server"
             }), 500
-        
+
         if not result.get('success'):
             error_msg = result.get('message', 'Unknown error')
             return jsonify({"success": False, "error": error_msg}), 400
 
         status = result.get('status')
         is_paid = result.get('is_paid', False)
-        
+
         logger.info(f"✅ Order #{order_id} - Status: {status}, Paid: {is_paid}")
 
         if status in ['completed', 'processing'] or is_paid:
-            r = reports_db[report_id]
             return jsonify({
                 "success": True,
                 "reportId": report_id,
-                "analysis": r['full_content'],
+                "analysis": report['full_content'],
                 "isLocked": False,
-                "kua": r.get('kua'),
-                "favorableDirections": r.get('dirs')
+                "kua": report.get('kua'),
+                "favorableDirections": report.get('dirs')
             })
         else:
             return jsonify({
-                "success": False, 
+                "success": False,
                 "error": f"Order status is '{status}'. Please complete payment first."
             }), 400
-            
+
     except requests.exceptions.Timeout:
         logger.error("❌ API timeout")
         return jsonify({"success": False, "error": "Verification timeout. Please try again."}), 504
@@ -497,19 +607,20 @@ def get_report(report_id=None):
     if report_id is None:
         report_id = request.args.get('reportId') or request.args.get('id')
 
-    if not report_id or report_id not in reports_db:
+    # ✅ SQLite 查询
+    report = load_report(report_id) if report_id else None
+    if not report:
         return jsonify({"success": False, "error": "Not found."}), 404
-    
-    r = reports_db[report_id]
+
     paid = request.args.get('paid', 'false').lower() == 'true'
-    
+
     return jsonify({
         "success": True,
         "reportId": report_id,
-        "analysis": r['full_content'] if paid else filter_report_for_free_tier(r['full_content']),
+        "analysis": report['full_content'] if paid else filter_report_for_free_tier(report['full_content']),
         "isLocked": not paid,
-        "kua": r.get('kua'),
-        "favorableDirections": r.get('dirs')
+        "kua": report.get('kua'),
+        "favorableDirections": report.get('dirs')
     })
 
 
