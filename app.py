@@ -114,10 +114,6 @@ WOO_CK = os.getenv("WOO_CK")
 WOO_CS = os.getenv("WOO_CS")
 WOO_URL = os.getenv("WOO_URL", "https://fengshuispaceplanner.com")
 
-FSP_SECRET_KEY = os.getenv("FSP_SECRET_KEY")
-if not FSP_SECRET_KEY:
-    logger.warning("⚠️ FSP_SECRET_KEY not set - order verification will fail")
-
 FSP_API_URL = "https://fengshuispaceplanner.com/wp-json/fsp-api/v1/verify-order"
 FSP_API_SECRET = os.getenv("FSP_API_SECRET")
 if not FSP_API_SECRET:
