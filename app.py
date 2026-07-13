@@ -432,7 +432,7 @@ CRITICAL RULES:
         logger.info("📝 Calling Qwen API...")
 
         resp = dashscope.MultiModalConversation.call(
-            model='deepseek-v4-flash',
+            model='qwen3.6-max-preview',
             api_key=QWEN_API_KEY,
             messages=[
                 {
