@@ -219,12 +219,20 @@ def filter_report_for_free_tier(full_text):
     return "\n".join(output_lines) + paywall
 
 # ✅ 输入清洗：只允许合法的家具类型和区域类型
-ALLOWED_ITEMS = {'bed', 'door', 'window', 'mirror', 'device', 'sofa', 'table', 'plant'}
-ALLOWED_AREAS = {'private', 'public', 'work', 'entertain'}
+# 卧室 + 办公室共用白名单
+ALLOWED_ITEMS = {
+    'bed', 'door', 'window', 'mirror', 'device', 'sofa', 'table', 'plant',  # 卧室
+    'desk', 'computer', 'filing_cabinet', 'meeting_table', 'bookshelf',      # 办公室
+}
+ALLOWED_AREAS = {
+    'private', 'public', 'work', 'entertain',   # 卧室
+    'focus', 'meeting', 'storage', 'break',      # 办公室
+}
 ALLOWED_POSITIONS = set(str(i) for i in range(1, 10))
 
 def sanitize_grid_data(grid_data):
-    """清洗前端传入的 gridData，防止 prompt 注入"""
+    """清洗前端传入的 gridData，防止 prompt 注入。
+    使用前缀匹配：'Bed (Head pointing North)' 以 'bed' 开头，通过白名单。"""
     if not isinstance(grid_data, dict):
         return {}
     clean = {}
@@ -233,7 +241,10 @@ def sanitize_grid_data(grid_data):
             continue
         if not isinstance(cell, dict):
             continue
-        items = [i for i in cell.get('items', []) if i in ALLOWED_ITEMS]
+        # 前缀匹配：允许 "Bed (Head pointing North)" 或 "Desk (Facing South)" 等带方向描述的 item
+        items = [i for i in cell.get('items', [])
+                 if any(i == allowed or i.lower().startswith(allowed + ' ') or i.lower().startswith(allowed + ' (')
+                        for allowed in ALLOWED_ITEMS)]
         areas = [a for a in cell.get('areaTypes', []) if a in ALLOWED_AREAS]
         if items or areas:
             clean[str(pos)] = {'items': items, 'areaTypes': areas}
@@ -260,7 +271,15 @@ def format_grid_data_for_ai(grid_data):
         pos_name = position_map.get(str(pos), f"Position {pos}")
         parts = []
         if items:
-            readable = [("Sleeping Bed" if i == 'bed' else i.replace('_', ' ').title()) for i in items]
+            def readable_name(item):
+                if item == 'bed': return 'Sleeping Bed'
+                if item == 'desk': return 'Office Desk'
+                if item == 'filing_cabinet': return 'Filing Cabinet'
+                if item == 'meeting_table': return 'Meeting Table'
+                if item == 'bookshelf': return 'Bookshelf'
+                if item == 'computer': return 'Computer'
+                return item.replace('_', ' ').title()
+            readable = [readable_name(i) for i in items]
             parts.append(f"contains {', '.join(readable)}")
         if areas:
             parts.append(f"marked as {', '.join([a.replace('_', ' ').title() for a in areas])} area")
@@ -309,7 +328,7 @@ def get_favorable_directions(kua):
 
 @app.route('/')
 def home():
-    return jsonify({"status": "running", "version": "3.0.0-hardened", "db": "sqlite"})
+    return jsonify({"status": "running", "version": "3.1.0-office", "db": "sqlite"})
 
 @app.route('/health')
 def health():
@@ -341,6 +360,7 @@ def process_layout():
         data = request.json or {}
         grid_data = sanitize_grid_data(data.get('gridData', {}))  # ✅ 清洗输入
         is_paid = data.get('isPaid', False)
+        room_type = data.get('room_type', 'bedroom')  # 'bedroom' 或 'office'，默认卧室兼容旧版
 
         info = data.get('personalInfo', {})
         gender = info.get('gender', '')
@@ -364,22 +384,98 @@ def process_layout():
         product_md_link = f"[{PRODUCT_NAME}]({PRODUCT_URL})"
         best_direction = dirs.get('best', 'Southwest')
 
-        # ✅ 产品上下文
-        product_context = (
-            f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
-            "SOURCE: Longhushan (Dragon Tiger Mountain), birthplace of Zhengyi Taoism.\n"
-            "DESCRIPTION: Crafted with 1500-year Taoist wisdom, designed to balance bedroom energy.\n"
-            "FUNCTION: Address specific imbalances identified in the bedroom analysis.\n"
-            "USAGE: Simple placement, no complex rituals required.\n"
-            "\n"
-            "IMPORTANT RESTRICTIONS - DO NOT USE THESE PHRASES:\n"
-            "- 'exact dimensions calibration' or 'precise measurement'\n"
-            "- 'electronic residue' or 'structural imbalances'\n"
-            "- 'actively stabilizes Qi' or 'hidden energy leaks'\n"
-            "- 'custom-calibrated to your room's exact dimensions and orientation'\n"
-        )
+        # ============================================================
+        # ✅ 分支：卧室 vs 办公室
+        # ============================================================
+        if room_type == 'office':
+            # --- 办公室产品上下文 ---
+            OFFICE_PRODUCT_URL = "https://fengshuispaceplanner.com/product/personalized-office-feng-shui-talisman/"
+            product_md_link = f"[{PRODUCT_NAME}]({OFFICE_PRODUCT_URL})"
+            product_context = (
+                f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
+                "SOURCE: Longhushan (Dragon Tiger Mountain), birthplace of Zhengyi Taoism.\n"
+                "DESCRIPTION: Crafted with 1500-year Taoist wisdom, designed to enhance office productivity and career success.\n"
+                "FUNCTION: Address specific imbalances identified in the office analysis.\n"
+                "USAGE: Simple desk placement, no complex rituals required.\n"
+                "\n"
+                "IMPORTANT RESTRICTIONS - DO NOT USE THESE PHRASES:\n"
+                "- 'exact dimensions calibration' or 'precise measurement'\n"
+                "- 'electronic residue' or 'structural imbalances'\n"
+                "- 'actively stabilizes Qi' or 'hidden energy leaks'\n"
+                "- 'custom-calibrated to your room's exact dimensions and orientation'\n"
+            )
 
-        prompt = f"""You are a Feng Shui Master. Analyze this bedroom layout.
+            prompt = f"""You are a Feng Shui Master. Analyze this office layout.
+
+User Data:
+- Layout: {room_desc}
+- Personal: {kua_info if kua_info else 'Not provided'}
+
+Product Context:
+{product_context}
+
+Task: Provide a Feng Shui report in Markdown. Always address the user directly using "you" and "your".
+
+Structure:
+## Overall Energy Assessment
+(2 sentences summarizing the flow of Qi in the office, focus on productivity and career energy)
+
+## Positive Aspects
+(2-3 points, use numbered list 1., 2., etc.)
+
+## Areas for Improvement
+(3-4 issues with impact, use numbered list 1., 2., etc.)
+
+## Recommended Changes
+(Provide exactly THREE distinct recommendations. Number them 1., 2., and 3.)
+
+1. [Write a specific recommendation based on desk placement, command position, or layout]
+2. [Write a specific recommendation based on decor, colors, or elements to boost productivity]
+3. For the {best_direction} sector, consider placing a {product_md_link} to help balance the energy in this area. This talisman, rooted in Longhushan Taoist tradition, is designed to address the specific imbalances identified in your office and works in harmony with your personal energy pattern.
+
+## Special Tips
+(2 personalized tips for office productivity, use numbered list 1., 2.)
+
+CRITICAL RULES:
+1. Always use "you" and "your" when addressing the user
+2. The product link must be EMBEDDED within a sentence, not on its own line
+3. Product recommendation must be SIMPLE and MODEST
+4. Apply OFFICE-specific Feng Shui principles:
+   - Command position: desk should face the door, solid wall behind, never back to door
+   - Key Bagua sectors: Southeast (Wealth), North (Career), Northwest (Mentors)
+   - Favorable elements: Wood (growth), Metal (clarity), Fire (energy)
+   - Avoid: desk under beams, facing a wall, back to window
+5. ALLOWED phrases:
+   - "enhance your office productivity"
+   - "address specific imbalances identified in your office"
+   - "works in harmony with your personal energy pattern"
+   - "rooted in Longhushan Taoist tradition"
+   - "no complex rituals required"
+6. FORBIDDEN phrases (do not use):
+   - "exact dimensions and orientation"
+   - "custom-calibrated to your room's precise measurements"
+   - "electronic residue"
+   - "structural imbalances"
+   - "actively stabilizes Qi"
+   - "hidden energy leaks"
+"""
+        else:
+            # --- 卧室产品上下文（保持不变） ---
+            product_context = (
+                f"RECOMMENDED CURE: {PRODUCT_NAME}\n"
+                "SOURCE: Longhushan (Dragon Tiger Mountain), birthplace of Zhengyi Taoism.\n"
+                "DESCRIPTION: Crafted with 1500-year Taoist wisdom, designed to balance bedroom energy.\n"
+                "FUNCTION: Address specific imbalances identified in the bedroom analysis.\n"
+                "USAGE: Simple placement, no complex rituals required.\n"
+                "\n"
+                "IMPORTANT RESTRICTIONS - DO NOT USE THESE PHRASES:\n"
+                "- 'exact dimensions calibration' or 'precise measurement'\n"
+                "- 'electronic residue' or 'structural imbalances'\n"
+                "- 'actively stabilizes Qi' or 'hidden energy leaks'\n"
+                "- 'custom-calibrated to your room's exact dimensions and orientation'\n"
+            )
+
+            prompt = f"""You are a Feng Shui Master. Analyze this bedroom layout.
 
 User Data:
 - Layout: {room_desc}
